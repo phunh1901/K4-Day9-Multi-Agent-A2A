@@ -93,14 +93,15 @@ class OpenRouterClient:
         }
 
     def _post(self, payload: Dict) -> Dict:
-        url = f"{llm_config.OPENROUTER_BASE_URL}/chat/completions"
-        body = json.dumps(payload).encode("utf-8")
-        last_error = None
+        url = f"{model_config.OPENROUTER_BASE_URL}/chat/completions"
+        payload = dict(payload)
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
-        for attempt in range(llm_config.MAX_RETRIES):
-            request = urllib.request.Request(url, data=body, headers=llm_config.build_headers())
+        last_error = None
+        for attempt in range(model_config.MAX_RETRIES):
+            request = urllib.request.Request(url, data=body, headers=model_config.build_headers())
             try:
-                with urllib.request.urlopen(request, timeout=llm_config.REQUEST_TIMEOUT_S) as resp:
+                with urllib.request.urlopen(request, timeout=model_config.REQUEST_TIMEOUT_S) as resp:
                     parsed = json.loads(resp.read().decode("utf-8"))
                 # OpenRouter can return HTTP 200 with an error envelope.
                 if "error" in parsed and not parsed.get("choices"):
@@ -124,7 +125,7 @@ class OpenRouterClient:
             # Exponential backoff with jitter; 429s are common on shared keys.
             time.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.75))
 
-        raise LLMError(f"exhausted {llm_config.MAX_RETRIES} attempts — {last_error}")
+        raise LLMError(f"exhausted {model_config.MAX_RETRIES} attempts — {last_error}")
 
 
 def parse_json_content(content: Optional[str]) -> Optional[Dict]:
