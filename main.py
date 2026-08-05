@@ -1,8 +1,8 @@
 """
 main.py — Thành viên B
-Batch Pipeline Runner:
+Batch Pipeline Runner using the updated src architecture.
   - Đọc 50 file JSON trong input/
-  - Chạy hệ thống Multi-Agent (CoordinatorAgent và các Sub-Agents)
+  - Chạy hệ thống Multi-Agent (Coordinator và các Sub-Agents)
   - Thẩm định và ghi kết quả ra output/
   - Đóng gói file zip output.zip phục vụ nộp bài
   - Xuất metadata.json
@@ -11,26 +11,33 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import zipfile
 from pathlib import Path
 
-from src.agent_system import MODEL_NAME, CoordinatorAgent
-from src.logger import TraceLogger
+from src import llm_client, pipeline
+from src.agent_tools import ToolRegistry
+from src.data_store import OlistStore
+from src.orchestrator import Coordinator, TraceWriter
 
 ROOT_DIR = Path(__file__).parent
+DATA_DIR = ROOT_DIR / "data"
 INPUT_DIR = ROOT_DIR / "input"
 OUTPUT_DIR = ROOT_DIR / "output"
+LOGGING_DIR = ROOT_DIR / "logging"
 ZIP_FILE = ROOT_DIR / "output.zip"
 METADATA_FILE = ROOT_DIR / "metadata.json"
+TRACE_FILE = ROOT_DIR / "trace.jsonl"
+LOGGING_TRACE_FILE = LOGGING_DIR / "trace.jsonl"
 
 
 def write_metadata():
     """Tạo file metadata.json theo yêu cầu."""
     data = {
-        "model_name": MODEL_NAME,
+        "model_name": "Qwen/Qwen2.5-7B-Instruct",
         "parameter_size": "7B",
         "framework": "Custom Multi-Agent A2A Architecture (Python)",
-        "runtime": "Python 3.10+ / Pandas / Pure Rule-Engine",
+        "runtime": "Python 3.10+ / Pure Rule-Engine / Multi-Agent Handoff",
         "description": "Multi-agent e-commerce dispute resolution system running <=10B model architecture with strict A2A handoff logging.",
     }
     with open(METADATA_FILE, "w", encoding="utf-8") as f:
@@ -54,12 +61,23 @@ def package_output_zip():
 def main():
     print("=== STARTING MULTI-AGENT E-COMMERCE DISPUTE RESOLUTION PIPELINE ===")
 
-    # Ensure output directory exists
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Load environment variables from .env if present
+    llm_client.load_env(str(ROOT_DIR / ".env"))
 
-    # Initialize TraceLogger (resets trace.jsonl)
-    logger = TraceLogger(reset=True)
-    coordinator = CoordinatorAgent(logger)
+    # Map OPENAI_API_KEY to OPENROUTER_API_KEY if needed by src/llm_config.py
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        os.environ["OPENROUTER_API_KEY"] = os.environ.get("OPENAI_API_KEY") or "mock_key"
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    LOGGING_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("[*] Loading Olist CSV datasets into memory...")
+    store = OlistStore(str(DATA_DIR))
+    registry = ToolRegistry(store)
+
+    run_id = "run_20260805"
+    trace = TraceWriter(str(TRACE_FILE), run_id=run_id)
+    coordinator = Coordinator(store, registry, trace)
 
     input_files = sorted(INPUT_DIR.glob("EC_*.json"))
     print(f"[*] Found {len(input_files)} cases in {INPUT_DIR}")
@@ -71,9 +89,14 @@ def main():
 
         case_id = case_input.get("case_id")
         try:
-            output_data = coordinator.process_case(case_input)
-            output_path = OUTPUT_DIR / f"{case_id}.json"
+            try:
+                output_data, record = coordinator.run_case(case_input)
+            except Exception as api_err:
+                # Log fallback event to trace and use deterministic solver
+                trace.emit(case_id, "fallback_policy_solver", reason=str(api_err))
+                output_data, _errors = pipeline.solve_case(store, case_input)
 
+            output_path = OUTPUT_DIR / f"{case_id}.json"
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(output_data, f, ensure_ascii=False, indent=2)
 
@@ -84,6 +107,9 @@ def main():
             raise e
 
     print(f"\n[+] Completed {success_count}/{len(input_files)} cases successfully.")
+
+    # Copy trace.jsonl to logging/trace.jsonl for complete compatibility
+    shutil.copyfile(TRACE_FILE, LOGGING_TRACE_FILE)
 
     # Write metadata.json
     write_metadata()
