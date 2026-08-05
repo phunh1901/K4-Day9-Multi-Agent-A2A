@@ -28,7 +28,7 @@ MODEL_CATALOG: Dict[str, Dict[str, object]] = {
 
 # One model for the whole graph keeps the run reproducible and the report
 # simple. Override per agent below if a role turns out to need something else.
-PRIMARY_MODEL = "meta-llama/llama-3.1-8b-instruct"
+PRIMARY_MODEL = "qwen/qwen-2.5-7b-instruct"
 
 AGENT_MODELS: Dict[str, str] = {
     "coordinator": PRIMARY_MODEL,

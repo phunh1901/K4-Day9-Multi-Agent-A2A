@@ -34,7 +34,7 @@ LOGGING_TRACE_FILE = LOGGING_DIR / "trace.jsonl"
 def write_metadata():
     """Tạo file metadata.json theo yêu cầu."""
     data = {
-        "model_name": "Qwen/Qwen2.5-7B-Instruct",
+        "model_name": "qwen/qwen-2.5-7b-instruct",
         "parameter_size": "7B",
         "framework": "Custom Multi-Agent A2A Architecture (Python)",
         "runtime": "Python 3.10+ / Pure Rule-Engine / Multi-Agent Handoff",
@@ -53,9 +53,9 @@ def package_output_zip():
 
     with zipfile.ZipFile(ZIP_FILE, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for filepath in json_files:
-            zf.write(filepath, arcname=f"output/{filepath.name}")
+            zf.write(filepath, arcname=filepath.name)
 
-    print(f"[+] Successfully created {ZIP_FILE} containing {len(json_files)} JSON files with arcname output/EC_xxx.json.")
+    print(f"[+] Successfully created {ZIP_FILE} containing {len(json_files)} JSON files (flat arcname EC_xxx.json).")
 
 
 def main():
