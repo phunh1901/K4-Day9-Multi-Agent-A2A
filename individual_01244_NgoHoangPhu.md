@@ -89,11 +89,14 @@ Dùng mẫu thiết kế Orchestrator - SubAgent. Coordinator nhận case, gọi
 
 **Câu trả lời:**
 
-1. Dữ liệu đi từ `input/EC_xxx.json` qua `CoordinatorAgent`, kích hoạt các SubAgent (`CustomerAgent`, `OrderProductAgent`, `PaymentAgent`, `DeliveryAgent`) truy vấn bảng Olist tương ứng từ `data_engine.py`.
-2. Bằng chứng thu thập được bàn giao qua `PolicyAgent` để áp dụng `EC_POLICY_V2`, xác định primary/secondary issue, khoản bồi thường và danh sách evidence.
-3. `VerifierAgent` thực hiện audit toàn bộ schema, giới hạn mảng (max 5/3/20), format string trước khi cho phép `main.py` ghi kết quả ra `output/`.
-4. Mọi tương tác truyền tin handoff được ghi lại chi tiết theo thời gian thực vào `trace.jsonl`.
-5. Đóng gói cuối cùng gom đúng 50 file JSON trong `output/` vào `output.zip` không kèm file phụ.
+1. **Phân định vai trò & Nguyên tắc Least-Privilege trong A2A Pipeline:** `CoordinatorAgent` giữ vai trò điều phối trung tâm, không tự tính toán nghiệp vụ. 6 Sub-agents chuyên trách (`CustomerAgent`, `OrderProductAgent`, `PaymentAgent`, `DeliveryAgent`, `PolicyAgent`, `VerifierAgent`) chỉ được truy cập đúng các bảng dữ liệu liên quan. Đặc biệt, `PolicyAgent` không đọc trực tiếp CSV mà chỉ đánh giá dựa trên bằng chứng được các agent khác handoff.
+2. **Giao thức Handoff A2A & Cây truy vết (Trace Logging):** Mọi thông điệp giữa các agent đều tuân theo cấu trúc handoff chuẩn hóa (`REQUEST`, `RESPONSE`, `EVENT`, `ERROR`) có `msg_id` và `parent_msg_id`. `TraceLogger` ghi vết thời gian thực vào `trace.jsonl` và `logging/trace.jsonl`, cho phép tái dựng toàn bộ cây hội thoại và quan hệ cha-con của từng case.
+3. **Quy trình tổng hợp bằng chứng & Thực thi Chính sách EC_POLICY_V2:** Dữ liệu từ các Sub-agent miền (khách hàng, mặt hàng, thanh toán, vận chuyển) được tổng hợp bàn giao cho `PolicyAgent` để đối soát theo bộ luật `EC_POLICY_V2`, xác định chính xác nguyên nhân gốc (root cause), bên chịu trách nhiệm (seller/carrier), phân loại lỗi chính/phụ, mức hoàn tiền và hành động xử lý.
+4. **Cơ chế Kiểm chứng đa tầng & Vòng phản hồi tự sửa lỗi (Self-Correction Loop):** `VerifierAgent` đóng vai trò cổng chặn độc lập, kiểm tra nghiêm ngặt 5 nhóm quy tắc (Schema, giới hạn mảng max 5/3/20, Grounding ID thực tế từ CSV, Null-handling, và tính nhất quán giữa Refund ↔ Case Status ↔ Root Cause). Khi phát hiện lỗi, `CoordinatorAgent` tự động chạy bước chuẩn hóa `normalize()` và verify lại (tối đa 2 vòng) trước khi ghi file.
+5. **Mô hình Hybrid AI (Deterministic Grounding kết hợp LLM Advisory ≤ 10B):** Toàn bộ dữ liệu cốt lõi (ID, con số, tiền tệ, nhãn) được quyết định 100% bằng Rule-Engine xác định từ CSV để đảm bảo chính xác tuyệt đối. Model LLM (`nvidia/nemotron-nano-9b-v2` - 9B, thỏa điều kiện ≤ 10B) chỉ đóng vai trò Advisor review và ghi lời giải thích ngôn ngữ tự nhiên vào trace, không trực tiếp can thiệp output JSON.
+6. **Xử lý ngoại lệ, Giới hạn Tải & Khả năng Vận hành Bền vững:** Hệ thống được tích hợp cơ chế tự động giãn nhịp gọi API (3.5s rate-limit mitigation), retry backoff cho free tier, xử lý mã hóa ASCII console tránh lỗi `UnicodeEncodeError` trên Windows, và khả năng tự động fallback mượt mà sang chế độ thuần Deterministic khi không có API key.
+7. **Quy trình Đóng gói Sản phẩm & Thẩm định Độc lập:** Sau khi `main.py` hoàn tất xử lý 50 cases và đóng gói đúng 50 file JSON vào `output.zip`, script `validate_submission.py` chạy độc lập để audit lại đĩa: kiểm tra cấu trúc ZIP, xác minh tính toàn vẹn của `trace.jsonl` (đảm bảo phủ đủ 50 cases x 6 sub-agents trong 1 `run_id` duy nhất) và đối soát thông số model trong `metadata.json`.
+
 
 ## 8. Cam kết của thành viên
 
