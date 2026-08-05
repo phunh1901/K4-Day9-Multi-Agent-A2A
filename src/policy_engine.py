@@ -152,6 +152,7 @@ def build_delivery_analysis(order: dict, items: list[dict], data_engine) -> dict
     """
     Xây dựng delivery_analysis block đầy đủ.
     data_engine là module src.data_engine để gọi compute_*.
+    Lưu ý: handoff_variance_hours = carrier_handoff_at - shipping_limit_date sớm nhất của seller.
     """
     delivered_at = order.get("order_delivered_customer_date")
     estimated_at = order.get("order_estimated_delivery_date")
@@ -160,33 +161,31 @@ def build_delivery_analysis(order: dict, items: list[dict], data_engine) -> dict
     # Delivery variance
     delivery_variance = data_engine.compute_delivery_variance(order)
 
-    # Seller handoff analysis
+    # Group items by seller_id to find the EARLIEST shipping_limit_date for each seller
+    seller_earliest_limit: dict[str, str] = {}
+    for item in items:
+        sid = item.get("seller_id")
+        limit = item.get("shipping_limit_date")
+        if sid and limit:
+            if sid not in seller_earliest_limit or str(limit) < str(seller_earliest_limit[sid]):
+                seller_earliest_limit[sid] = limit
+
     seller_handoff_list = []
     late_handoff_seller_ids = []
 
-    for item in items:
-        seller_id = item.get("seller_id")
-        shipping_limit = item.get("shipping_limit_date")
-        h_variance = data_engine.compute_handoff_variance(order, item)
+    for sid, earliest_limit in seller_earliest_limit.items():
+        dummy_item = {"shipping_limit_date": earliest_limit}
+        h_variance = data_engine.compute_handoff_variance(order, dummy_item)
         is_late = h_variance is not None and h_variance > 0
 
-        # Tránh trùng seller (giữ bản late nhất nếu có nhiều item cùng seller)
-        existing = next((s for s in seller_handoff_list if s["seller_id"] == seller_id), None)
-        if existing is None:
-            seller_handoff_list.append({
-                "seller_id": seller_id,
-                "shipping_limit_at": shipping_limit,
-                "handoff_variance_hours": h_variance,
-                "late_handoff": is_late,
-            })
-        elif is_late and not existing["late_handoff"]:
-            # Cập nhật nếu phát hiện late mà record cũ chưa ghi nhận
-            existing["late_handoff"] = True
-            existing["handoff_variance_hours"] = h_variance
-            existing["shipping_limit_at"] = shipping_limit
-
-        if is_late and seller_id not in late_handoff_seller_ids:
-            late_handoff_seller_ids.append(seller_id)
+        seller_handoff_list.append({
+            "seller_id": sid,
+            "shipping_limit_at": earliest_limit,
+            "handoff_variance_hours": h_variance,
+            "late_handoff": is_late,
+        })
+        if is_late and sid not in late_handoff_seller_ids:
+            late_handoff_seller_ids.append(sid)
 
     # Normalize timestamps: trả về None nếu NaT/empty
     def _ts(val):
