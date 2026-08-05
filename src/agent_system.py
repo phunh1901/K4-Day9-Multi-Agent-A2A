@@ -1,438 +1,590 @@
 """
-agent_system.py — Thành viên B
-Kiến trúc Multi-Agent A2A (Agent-to-Agent):
-  - Coordinator Agent: Điều phối luồng làm việc
-  - Customer Agent: Lịch sử & Identity khách hàng
-  - Order & Product Agent: Đơn hàng, sản phẩm, danh mục, seller
-  - Payment Agent: Thanh toán & Đối soát tài chính
-  - Delivery Agent: Vận chuyển & Handoff seller
-  - Policy Agent: Tổng hợp bằng chứng, áp dụng EC_POLICY_V2
-  - Verifier Agent: Kiểm tra hợp lệ trước khi hoàn tất
+agent_system.py — Đinh Quốc Việt (nhánh `viet`)
+Hệ Multi-Agent A2A giải quyết khiếu nại thương mại điện tử.
 
-Mỗi agent có vai trò rõ ràng, trao đổi dữ liệu (handoff) có ghi vết vào logger.
+Thiết kế:
+  - 6 sub-agent chuyên trách, mỗi agent chỉ được cấp đúng phần dữ liệu cần cho
+    domain của mình (least-privilege): agent nào không cần bảng nào thì không
+    đọc bảng đó.
+  - Coordinator không tự tính toán nghiệp vụ. Nó phát REQUEST, nhận RESPONSE,
+    ráp kết quả và đưa qua Verifier.
+  - Verifier là vòng phản hồi thật: nếu output vi phạm schema/giới hạn, nó trả
+    REPAIR_REQUIRED kèm danh sách lỗi, Coordinator chạy bước chuẩn hóa rồi gửi
+    lại. Chỉ khi verify sạch lỗi, case mới được ghi ra file.
+  - Toàn bộ REQUEST/RESPONSE được ghi vào trace.jsonl kèm msg_id / parent_msg_id
+    nên có thể dựng lại cây handoff của từng case.
+
+Model: khai báo cứng trong source (MODEL_NAME), không đặt trong .env.
 """
 from __future__ import annotations
 
+import json
 import os
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 
-from src import data_engine, policy_engine, verifier
-from src.logger import TraceLogger
+from src import policy_engine
+from src.data_engine import OlistRepository, get_repository
+from src.logger import Stopwatch, TraceLogger
+from src.verifier import verify_output
 
 load_dotenv()
 
-# Tên model sử dụng cho hệ thống Multi-Agent
-MODEL_NAME = "gpt-4o"
+# ---------------------------------------------------------------------------
+# Cấu hình model — phải <= 10B parameters theo yêu cầu đề bài
+# ---------------------------------------------------------------------------
+MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+MODEL_PARAMETER_SIZE = "7.6B"
+MODEL_TEMPERATURE = 0.0
+MODEL_MAX_TOKENS = 256
 
-# Secret & API Keys loaded strictly from .env (never hardcoded, never committed)
-OPENAI_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("TOGETHER_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
-OPENAI_BASE_URL = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+# Chỉ endpoint và khóa nằm trong .env; tên model luôn nằm trong source.
+LLM_API_KEY = (
+    os.getenv("LLM_API_KEY")
+    or os.getenv("TOGETHER_API_KEY")
+    or os.getenv("OPENAI_API_KEY")
+    or ""
+)
+LLM_BASE_URL = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.together.xyz/v1"
 
-try:
+try:  # openai SDK là optional: thiếu nó hệ thống vẫn chạy ở chế độ deterministic
     import openai
-except ImportError:
+except ImportError:  # pragma: no cover
     openai = None
 
 
-class LLMReasoningEngine:
+class LLMAdvisor:
     """
-    LLM Inference Engine đại diện cho mô hình LLM <= 10B (Qwen/Qwen2.5-7B-Instruct).
-    Thực hiện suy luận cho các Agent trong hệ thống Multi-Agent A2A.
+    Cầu nối tới model <= 10B (`Qwen/Qwen2.5-7B-Instruct`).
+
+    Vai trò: *advisory only*. Model được dùng để diễn giải/đối chiếu lại kết luận
+    của rule-engine bằng ngôn ngữ tự nhiên và ghi vào trace; nó không được phép
+    sửa con số, ID hay quyết định trong output. Lý do: mọi trường trong schema đều
+    phải kiểm chứng được từ CSV, nên nguồn sự thật duy nhất là dữ liệu, còn LLM chỉ
+    đóng vai reviewer. Khi không cấu hình khóa API, hệ thống chạy hoàn toàn
+    deterministic và trace ghi rõ `llm_available: false`.
     """
 
-    def __init__(self, model_name: str = MODEL_NAME, api_key: str = OPENAI_API_KEY, base_url: str = OPENAI_BASE_URL):
-        self.model_name = model_name
-        self.api_key = api_key
-        self.base_url = base_url
+    def __init__(self) -> None:
+        self.model_name = MODEL_NAME
         self.client = None
-
-        if openai and self.api_key and self.api_key != "sk-proj-your_api_key_here":
+        self.calls = 0
+        if openai and LLM_API_KEY:
             try:
-                kw = {"api_key": self.api_key}
-                if self.base_url and ("http://" in self.base_url or "https://" in self.base_url):
-                    kw["base_url"] = self.base_url
-                self.client = openai.OpenAI(**kw)
-            except Exception as e:
-                print(f"[!] Could not initialize OpenAI LLM client: {e}")
+                self.client = openai.OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+            except Exception as exc:  # pragma: no cover
+                print(f"[!] Không khởi tạo được LLM client: {exc}")
 
-    def query_reasoning(self, agent_role: str, system_prompt: str, user_prompt: str) -> str:
-        """Thực hiện suy luận ngôn ngữ tự nhiên từ LLM Model (Qwen/Qwen2.5-7B-Instruct)."""
-        if not self.client:
-            return f"[{agent_role} LLM Reasoning via {self.model_name}]: Domain rules evaluated."
+    @property
+    def available(self) -> bool:
+        return self.client is not None
+
+    def review(self, agent_role: str, system_prompt: str, user_prompt: str) -> dict:
+        """Trả về {'llm_available', 'model', 'note'} — luôn an toàn, không raise."""
+        if not self.available:
+            return {"llm_available": False, "model": self.model_name, "note": "deterministic-only"}
         try:
-            response = self.client.chat.completions.create(
+            self.calls += 1
+            completion = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[
-                    {"role": "system", "content": f"You are {agent_role} using LLM {self.model_name}. {system_prompt}"},
+                    {"role": "system", "content": f"Bạn là {agent_role}. {system_prompt}"},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.1,
-                max_tokens=300,
+                temperature=MODEL_TEMPERATURE,
+                max_tokens=MODEL_MAX_TOKENS,
             )
-            return response.choices[0].message.content or ""
-        except Exception as e:
-            return f"[{agent_role} LLM Inference Fallback]: {e}"
+            return {
+                "llm_available": True,
+                "model": self.model_name,
+                "note": (completion.choices[0].message.content or "").strip()[:500],
+            }
+        except Exception as exc:
+            return {"llm_available": True, "model": self.model_name, "note": f"llm_error: {exc}"}
 
+
+# ---------------------------------------------------------------------------
+# Sub-agent
+# ---------------------------------------------------------------------------
 
 class SubAgent:
-    """Base class đại diện cho một Sub-Agent trong hệ thống Multi-Agent."""
+    """Agent nhận REQUEST từ Coordinator và trả RESPONSE có ghi vết."""
 
-    def __init__(self, name: str, role: str, logger: TraceLogger):
-        self.name = name
-        self.role = role
+    name = "SubAgent"
+    role = ""
+    data_access: tuple[str, ...] = ()
+
+    def __init__(self, logger: TraceLogger, repo: OlistRepository, advisor: LLMAdvisor):
         self.logger = logger
-        self.llm_engine = LLMReasoningEngine()
+        self.repo = repo
+        self.advisor = advisor
 
-    def handoff(self, case_id: str, receiver: str, action: str, message: str, payload: dict, evidence_ids: list[str] | None = None):
-        """Ghi vết handoff truyền tin tới agent tiếp theo."""
-        return self.logger.log_handoff(
-            case_id=case_id,
-            sender_agent=self.name,
-            receiver_agent=receiver,
-            action=action,
-            message=message,
-            payload_summary=payload,
-            evidence_ids=evidence_ids or [],
-        )
+    def handle(self, case_id: str, request: dict) -> tuple[dict, str, dict]:
+        """Trả về (payload đầy đủ, message tóm tắt, payload_summary cho trace)."""
+        raise NotImplementedError
 
 
 class CustomerAgent(SubAgent):
-    def __init__(self, logger: TraceLogger):
-        super().__init__("CustomerAgent", "Xác định danh tính và lịch sử khách hàng", logger)
+    name = "CustomerAgent"
+    role = "Xác định danh tính khách hàng và lịch sử mua hàng"
+    data_access = ("customers", "orders")
 
-    def analyze(self, case_id: str, order: dict) -> dict:
-        cust_id = order.get("customer_id")
-        cust_info = data_engine.get_customer(cust_id) if cust_id else None
-        cust_unique_id = cust_info.get("customer_unique_id") if cust_info else None
+    def handle(self, case_id: str, request: dict):
+        order = request["order"]
+        customer = self.repo.get_customer(order.get("customer_id"))
+        customer_unique_id = customer.get("customer_unique_id") if customer else None
 
-        related_orders = []
-        if cust_unique_id:
-            related_orders = data_engine.get_customer_orders(cust_unique_id)
+        all_orders = self.repo.get_customer_order_ids(customer_unique_id)
+        related = [oid for oid in all_orders if oid != order.get("order_id")]
 
-        # Loại bỏ order hiện tại khỏi related_order_ids
-        claimed_order_id = order.get("order_id")
-        related_orders = [o for o in related_orders if o != claimed_order_id]
-        related_orders = policy_engine._limit(related_orders, "related_order_ids")
-
-        result = {
-            "customer_unique_id": cust_unique_id,
-            "related_order_ids": related_orders,
-            "is_repeat_customer": len(related_orders) > 0,
+        payload = {
+            "customer_unique_id": customer_unique_id,
+            "related_order_ids": policy_engine.limit(related, "related_order_ids"),
+            "related_order_count": len(related),
         }
-
-        self.handoff(
-            case_id=case_id,
-            receiver="CoordinatorAgent",
-            action="CUSTOMER_CONTEXT_READY",
-            message=f"Đã trích xuất lịch sử khách hàng {cust_unique_id}. Tìm thấy {len(related_orders)} đơn hàng liên quan.",
-            payload=result,
+        message = (
+            f"customer_unique_id={customer_unique_id}; {len(related)} order khác của cùng khách "
+            f"(giữ tối đa {len(payload['related_order_ids'])} theo giới hạn schema)"
         )
-        return result
+        return payload, message, payload
 
 
 class OrderProductAgent(SubAgent):
-    def __init__(self, logger: TraceLogger):
-        super().__init__("OrderProductAgent", "Kiểm tra đơn hàng, item, sản phẩm, seller và category", logger)
+    name = "OrderProductAgent"
+    role = "Đối chiếu item, seller, sản phẩm và category của order"
+    data_access = ("order_items", "products", "sellers")
 
-    def analyze(self, case_id: str, order_id: str) -> dict:
-        items = data_engine.get_order_items(order_id)
-        product_ids = []
-        seller_ids = []
-        category_names = []
+    def handle(self, case_id: str, request: dict):
+        order_id = request["order_id"]
+        items = self.repo.get_order_items(order_id)
 
-        for item in items:
-            pid = item.get("product_id")
-            sid = item.get("seller_id")
-            if pid and pid not in product_ids:
-                product_ids.append(pid)
-            if sid and sid not in seller_ids:
-                seller_ids.append(sid)
-
-            if pid:
-                prod = data_engine.get_product(pid)
-                if prod:
-                    cat_pt = prod.get("product_category_name", "")
-                    if cat_pt:
-                        cat_en = data_engine.get_category_name_en(cat_pt)
-                        if cat_en not in category_names:
-                            category_names.append(cat_en)
-
-        # Limiting arrays according to policy limits
-        product_ids_lim = policy_engine._limit(product_ids, "product_ids")
-        seller_ids_lim = policy_engine._limit(seller_ids, "seller_ids")
-        category_names_lim = policy_engine._limit(category_names, "category_names")
-        item_ids_lim = policy_engine._limit([f"{order_id}:{i.get('order_item_id')}" for i in items], "item_ids")
-
-        result = {
-            "items": items,
-            "item_ids": item_ids_lim,
-            "product_ids": product_ids_lim,
-            "seller_ids": seller_ids_lim,
-            "category_names": category_names_lim,
-            "is_multi_item": len(items) >= 2,
-            "is_multi_seller": len(seller_ids) >= 2,
-            "is_multiple_categories": len(category_names) >= 2,
-        }
-
-        self.handoff(
-            case_id=case_id,
-            receiver="CoordinatorAgent",
-            action="ORDER_PRODUCT_CONTEXT_READY",
-            message=f"Đã phân tích {len(items)} items, {len(seller_ids)} sellers, {len(product_ids)} products.",
-            payload={
-                "item_count": len(items),
-                "seller_count": len(seller_ids),
-                "category_count": len(category_names),
-            },
+        item_ids = [f"{order_id}:{i.get('order_item_id')}" for i in items]
+        seller_ids = policy_engine.dedupe([i.get("seller_id") for i in items])
+        product_ids = policy_engine.dedupe([i.get("product_id") for i in items])
+        category_names = policy_engine.dedupe(
+            [self.repo.get_category_name(pid) for pid in product_ids]
         )
-        return result
+
+        payload = {
+            "items": items,
+            "item_ids": policy_engine.limit(item_ids, "item_ids"),
+            "seller_ids": policy_engine.limit(seller_ids, "seller_ids"),
+            "product_ids": policy_engine.limit(product_ids, "product_ids"),
+            "category_names": policy_engine.limit(category_names, "category_names"),
+            "item_count": len(items),
+            "seller_count": len(seller_ids),
+            "category_count": len(category_names),
+        }
+        message = (
+            f"{len(items)} item row, {len(seller_ids)} seller, {len(product_ids)} product, "
+            f"{len(category_names)} category"
+        )
+        summary = {k: v for k, v in payload.items() if k != "items"}
+        return payload, message, summary
 
 
 class PaymentAgent(SubAgent):
-    def __init__(self, logger: TraceLogger):
-        super().__init__("PaymentAgent", "Tổng hợp payment rows và đối soát với expected total", logger)
+    name = "PaymentAgent"
+    role = "Tổng hợp payment row và đối soát với item + freight"
+    data_access = ("order_payments",)
 
-    def analyze(self, case_id: str, order_id: str, items: list[dict]) -> dict:
-        payments = data_engine.get_order_payments(order_id)
-        payment_ids = policy_engine._limit([f"{order_id}:{p.get('payment_sequential')}" for p in payments], "payment_ids")
-        reconciliation = data_engine.compute_payment_reconciliation(items, payments)
+    def handle(self, case_id: str, request: dict):
+        order_id = request["order_id"]
+        items = request["items"]
+        payments = self.repo.get_order_payments(order_id)
+        reconciliation = self.repo.compute_payment_reconciliation(items, payments)
 
-        result = {
+        payload = {
             "payments": payments,
-            "payment_ids": payment_ids,
+            "payment_ids": policy_engine.limit(
+                [f"{order_id}:{p.get('payment_sequential')}" for p in payments], "payment_ids"
+            ),
             "reconciliation": reconciliation,
-            "is_split_payment": len(payments) >= 2,
+            "payment_count": len(payments),
         }
-
-        self.handoff(
-            case_id=case_id,
-            receiver="CoordinatorAgent",
-            action="PAYMENT_RECONCILIATION_READY",
-            message=f"Đối soát tài chính xong. Reconciled: {reconciliation.get('reconciled')}, diff: {reconciliation.get('difference_brl')} BRL.",
-            payload=reconciliation,
+        message = (
+            f"{len(payments)} payment row, payment_total={reconciliation['payment_total_brl']} BRL, "
+            f"expected={reconciliation['expected_total_brl']}, "
+            f"difference={reconciliation['difference_brl']}, reconciled={reconciliation['reconciled']}"
         )
-        return result
+        return payload, message, {"payment_ids": payload["payment_ids"], **reconciliation}
 
 
 class DeliveryAgent(SubAgent):
-    def __init__(self, logger: TraceLogger):
-        super().__init__("DeliveryAgent", "Tính toán delivery variance và seller handoff variance", logger)
+    name = "DeliveryAgent"
+    role = "Tính delivery variance và seller handoff variance"
+    data_access = ("orders", "order_items")
 
-    def analyze(self, case_id: str, order: dict, items: list[dict]) -> dict:
-        analysis = policy_engine.build_delivery_analysis(order, items, data_engine)
-
-        self.handoff(
-            case_id=case_id,
-            receiver="CoordinatorAgent",
-            action="DELIVERY_ANALYSIS_READY",
-            message=f"Tính toán vận chuyển xong. Delivery variance: {analysis.get('delivery_variance_hours')}h, Late sellers: {analysis.get('late_handoff_seller_ids')}.",
-            payload={
-                "delivery_variance_hours": analysis.get("delivery_variance_hours"),
-                "late_sellers_count": len(analysis.get("late_handoff_seller_ids", [])),
-            },
+    def handle(self, case_id: str, request: dict):
+        analysis = policy_engine.build_delivery_analysis(
+            request["order"], request["items"], self.repo
         )
-        return analysis
+        payload = {"delivery_analysis": analysis, "is_late": policy_engine.is_late_delivery(analysis)}
+        message = (
+            f"delivery_variance={analysis['delivery_variance_hours']}h, "
+            f"late_delivery={payload['is_late']}, "
+            f"late_sellers={analysis['late_handoff_seller_ids'] or 'không có'}"
+        )
+        summary = {
+            "delivery_variance_hours": analysis["delivery_variance_hours"],
+            "carrier_handoff_at": analysis["carrier_handoff_at"],
+            "late_handoff_seller_ids": analysis["late_handoff_seller_ids"],
+            "is_late": payload["is_late"],
+        }
+        return payload, message, summary
 
 
 class PolicyAgent(SubAgent):
-    def __init__(self, logger: TraceLogger):
-        super().__init__("PolicyAgent", "Áp dụng EC_POLICY_V2 để đưa ra quyết định xử lý khiếu nại", logger)
+    name = "PolicyAgent"
+    role = "Áp dụng EC_POLICY_V2 lên bằng chứng do các agent khác bàn giao"
+    data_access = ()  # chỉ làm việc trên bằng chứng đã được handoff
 
-    def evaluate(
-        self,
-        case_id: str,
-        order: dict,
-        items: list[dict],
-        payments: list[dict],
-        customer_ctx: dict,
-        order_prod_ctx: dict,
-        payment_recon: dict,
-        delivery_analysis: dict,
-    ) -> dict:
-        claimed_order_id = order.get("order_id")
+    def handle(self, case_id: str, request: dict):
+        order = request["order"]
+        order_id = order["order_id"]
+        items = request["items"]
+        payments = request["payments"]
+        reconciliation = request["reconciliation"]
+        delivery = request["delivery_analysis"]
 
-        # 1. Primary Issue
-        primary_issue = policy_engine.determine_primary_issue(
-            order, items, payments, payment_recon, delivery_analysis
+        primary_issue, rationale = policy_engine.determine_primary_issue(
+            order, payments, reconciliation, delivery
         )
-
-        # 2. Secondary Issues
         secondary_issues = policy_engine.determine_secondary_issues(
-            items,
-            payments,
-            customer_ctx.get("related_order_ids", []),
-            claimed_order_id,
-            order_prod_ctx.get("category_names", []),
+            items, payments, request["related_order_ids"], request["category_names"]
         )
-
-        # 3. Root Cause & Responsible Parties
         root_cause_code = policy_engine.get_root_cause_code(primary_issue)
-        late_sellers = delivery_analysis.get("late_handoff_seller_ids", [])
-        responsible_parties = policy_engine.build_responsible_parties(primary_issue, late_sellers)
-
-        # 4. Financial Resolution
-        financial_resolution = policy_engine.compute_financial_resolution(primary_issue, payment_recon)
-        refund_amount = financial_resolution.get("recommended_refund_brl", 0.0)
-
-        # 5. Evidence IDs
+        responsible_parties = policy_engine.build_responsible_parties(
+            primary_issue, delivery["late_handoff_seller_ids"]
+        )
+        financial_resolution = policy_engine.compute_financial_resolution(primary_issue, reconciliation)
+        refund = financial_resolution["recommended_refund_brl"]
+        actions = policy_engine.build_resolution_actions(primary_issue, secondary_issues, payments)
         evidence_ids = policy_engine.build_evidence_ids(
-            claimed_order_id,
+            order_id,
             items,
             payments,
             [p["party_id"] for p in responsible_parties if p["party_type"] == "seller"],
             root_cause_code,
         )
-
-        # 6. Resolution Actions
-        resolution_actions = policy_engine.build_resolution_actions(
-            primary_issue, secondary_issues, delivery_analysis, payments
+        confidence = policy_engine.compute_confidence(
+            primary_issue, reconciliation, delivery, items, payments
         )
 
-        # 7. Case Status & Confidence
-        case_status = "action_required" if refund_amount > 0 else "no_action"
-        confidence = 0.95  # Độ tin cậy cao dựa trên dữ liệu đối soát thực tế
-
-        result = {
+        payload = {
             "primary_issue": primary_issue,
             "secondary_issues": secondary_issues,
-            "case_status": case_status,
+            "case_status": "action_required" if refund > 0 else "no_action",
             "confidence": confidence,
-            "root_cause_code": root_cause_code,
+            "ranked_causes": policy_engine.build_ranked_causes(primary_issue),
             "responsible_parties": responsible_parties,
             "financial_resolution": financial_resolution,
+            "resolution_actions": actions,
             "evidence_ids": evidence_ids,
-            "resolution_actions": resolution_actions,
+            "rationale": rationale,
         }
 
-        self.handoff(
-            case_id=case_id,
-            receiver="CoordinatorAgent",
-            action="POLICY_EVALUATION_COMPLETE",
-            message=f"Đã áp dụng EC_POLICY_V2. Primary: {primary_issue}, Refund: {refund_amount} BRL, Actions: {resolution_actions}.",
-            payload={
-                "primary_issue": primary_issue,
-                "refund_brl": refund_amount,
-                "action_count": len(resolution_actions),
-            },
-            evidence_ids=evidence_ids,
+        # Bước review bằng model <= 10B: chỉ diễn giải, không sửa số liệu.
+        review = self.advisor.review(
+            agent_role="Policy reviewer của hệ dispute resolution",
+            system_prompt=(
+                "Bạn chỉ được xác nhận hoặc nêu nghi vấn về kết luận, tuyệt đối không "
+                "bịa thêm sự kiện và không thay đổi con số. Trả lời tối đa 2 câu tiếng Việt."
+            ),
+            user_prompt=json.dumps(
+                {
+                    "order_status": order.get("order_status"),
+                    "delivery_variance_hours": delivery["delivery_variance_hours"],
+                    "late_handoff_seller_ids": delivery["late_handoff_seller_ids"],
+                    "payment_total_brl": reconciliation["payment_total_brl"],
+                    "expected_total_brl": reconciliation["expected_total_brl"],
+                    "primary_issue": primary_issue,
+                    "recommended_refund_brl": refund,
+                },
+                ensure_ascii=False,
+            ),
         )
-        return result
+        payload["llm_review"] = review
+
+        message = (
+            f"primary={primary_issue} ({rationale}); secondary={secondary_issues or 'không có'}; "
+            f"refund={refund} BRL; actions={actions}"
+        )
+        summary = {
+            "primary_issue": primary_issue,
+            "secondary_issues": secondary_issues,
+            "root_cause_code": root_cause_code,
+            "responsible_parties": responsible_parties,
+            "recommended_refund_brl": refund,
+            "resolution_actions": actions,
+            "confidence": confidence,
+            "rationale": rationale,
+            "llm_review": review,
+        }
+        return payload, message, summary
 
 
 class VerifierAgent(SubAgent):
-    def __init__(self, logger: TraceLogger):
-        super().__init__("VerifierAgent", "Kiểm tra schema và ràng buộc nghiệp vụ của output JSON", logger)
+    name = "VerifierAgent"
+    role = "Kiểm tra schema, giới hạn mảng, grounding ID và nhất quán nghiệp vụ"
+    data_access = ("orders", "order_items", "order_payments", "sellers")
 
-    def verify(self, case_id: str, output_data: dict) -> bool:
-        errors = verifier.verify_output(output_data)
-        is_valid = len(errors) == 0
+    def handle(self, case_id: str, request: dict):
+        errors = verify_output(request["output"], self.repo)
+        payload = {"valid": not errors, "errors": errors}
+        message = "output hợp lệ" if not errors else f"phát hiện {len(errors)} lỗi: {errors[:3]}"
+        return payload, message, payload
 
-        self.handoff(
-            case_id=case_id,
-            receiver="CoordinatorAgent",
-            action="VERIFICATION_RESULT",
-            message=f"Kiểm tra output JSON: {'HỢP LỆ' if is_valid else f'CÓ LỖI ({len(errors)})'}",
-            payload={"is_valid": is_valid, "errors": errors},
-        )
-        if not is_valid:
-            raise ValueError(f"Output verification failed for case {case_id}: {errors}")
-        return is_valid
 
+# ---------------------------------------------------------------------------
+# Coordinator
+# ---------------------------------------------------------------------------
 
 class CoordinatorAgent:
-    """Coordinator Agent — Nhận case, điều phối công việc cho các Sub-Agents và tổng hợp kết quả cuối."""
+    """Điều phối: giao việc, nhận bàn giao, ráp output, gọi kiểm chứng và sửa lỗi."""
 
-    def __init__(self, logger: TraceLogger):
+    name = "CoordinatorAgent"
+    MAX_REPAIR_ROUNDS = 2
+
+    def __init__(self, logger: TraceLogger, repo: Optional[OlistRepository] = None):
         self.logger = logger
-        self.customer_agent = CustomerAgent(logger)
-        self.order_prod_agent = OrderProductAgent(logger)
-        self.payment_agent = PaymentAgent(logger)
-        self.delivery_agent = DeliveryAgent(logger)
-        self.policy_agent = PolicyAgent(logger)
-        self.verifier_agent = VerifierAgent(logger)
+        self.repo = repo or get_repository()
+        self.advisor = LLMAdvisor()
+        self.agents: dict[str, SubAgent] = {
+            agent.name: agent
+            for agent in (
+                CustomerAgent(logger, self.repo, self.advisor),
+                OrderProductAgent(logger, self.repo, self.advisor),
+                PaymentAgent(logger, self.repo, self.advisor),
+                DeliveryAgent(logger, self.repo, self.advisor),
+                PolicyAgent(logger, self.repo, self.advisor),
+                VerifierAgent(logger, self.repo, self.advisor),
+            )
+        }
+        self.stats: dict[str, int] = {"repairs": 0, "cases": 0}
 
+    # -- giao thức A2A -----------------------------------------------------
+    def dispatch(self, case_id: str, agent_name: str, action: str, request: dict,
+                 request_note: str) -> dict:
+        """Gửi REQUEST tới sub-agent, nhận RESPONSE, ghi cả hai chiều vào trace."""
+        agent = self.agents[agent_name]
+        req_id = self.logger.request(
+            case_id, self.name, agent.name, action, request_note,
+            payload={"data_access": list(agent.data_access), "role": agent.role},
+        )
+        try:
+            with Stopwatch() as sw:
+                payload, message, summary = agent.handle(case_id, request)
+        except Exception as exc:
+            self.logger.error(
+                case_id, agent.name, self.name, f"{action}_FAILED", str(exc), parent=req_id
+            )
+            raise
+
+        self.logger.response(
+            case_id, agent.name, self.name, f"{action}_DONE", message,
+            payload=summary, evidence_ids=payload.get("evidence_ids"),
+            parent=req_id, latency_ms=sw.elapsed_ms,
+        )
+        return payload
+
+    # -- xử lý một case ----------------------------------------------------
     def process_case(self, case_input: dict) -> dict:
         case_id = case_input.get("case_id", "UNKNOWN")
         claimed_order_id = case_input.get("customer_request", {}).get("claimed_order_id")
+        policy_version = case_input.get("policy_version", policy_engine.POLICY_VERSION)
 
-        self.logger.log_handoff(
-            case_id=case_id,
-            sender_agent="User",
-            receiver_agent="CoordinatorAgent",
-            action="CASE_RECEIVED",
-            message=f"Bắt đầu điều tra khiếu nại case {case_id} cho claimed_order_id={claimed_order_id}",
-            payload_summary={"claimed_order_id": claimed_order_id},
+        intake_id = self.logger.event(
+            case_id, "CustomerRequest", self.name, "CASE_RECEIVED",
+            f"Nhận khiếu nại {case_id} cho order {claimed_order_id} theo {policy_version}",
+            payload={
+                "claimed_order_id": claimed_order_id,
+                "policy_version": policy_version,
+                "investigation_scope": case_input.get("investigation_scope", {}),
+            },
         )
 
-        order = data_engine.get_order(claimed_order_id)
+        order = self.repo.get_order(claimed_order_id)
         if not order:
-            raise ValueError(f"Order {claimed_order_id} not found in database!")
+            self.logger.error(
+                case_id, self.name, "CustomerRequest", "ORDER_NOT_FOUND",
+                f"Không tìm thấy order {claimed_order_id} trong orders CSV", parent=intake_id,
+            )
+            raise ValueError(f"Order {claimed_order_id} không tồn tại trong dữ liệu Olist")
 
-        # 1. Handoff to CustomerAgent
-        cust_ctx = self.customer_agent.analyze(case_id, order)
-
-        # 2. Handoff to OrderProductAgent
-        op_ctx = self.order_prod_agent.analyze(case_id, claimed_order_id)
-        items = op_ctx.get("items", [])
-
-        # 3. Handoff to PaymentAgent
-        pay_ctx = self.payment_agent.analyze(case_id, claimed_order_id, items)
-        payments = pay_ctx.get("payments", [])
-        payment_recon = pay_ctx.get("reconciliation", {})
-
-        # 4. Handoff to DeliveryAgent
-        del_analysis = self.delivery_agent.analyze(case_id, order, items)
-
-        # 5. Handoff to PolicyAgent
-        policy_eval = self.policy_agent.evaluate(
-            case_id, order, items, payments, cust_ctx, op_ctx, payment_recon, del_analysis
+        # 1) Customer identity & history
+        customer_ctx = self.dispatch(
+            case_id, "CustomerAgent", "RESOLVE_CUSTOMER_HISTORY",
+            {"order": order},
+            f"Xác định customer_unique_id và các order khác của khách trên order {claimed_order_id}",
         )
 
-        # 6. Assembly final output JSON
-        output_data = {
+        # 2) Order / item / seller / product
+        order_ctx = self.dispatch(
+            case_id, "OrderProductAgent", "INSPECT_ORDER_ITEMS",
+            {"order_id": claimed_order_id},
+            "Liệt kê item, seller, product và category của order",
+        )
+        items = order_ctx["items"]
+
+        # 3) Payment reconciliation (cần item để tính expected total)
+        payment_ctx = self.dispatch(
+            case_id, "PaymentAgent", "RECONCILE_PAYMENTS",
+            {"order_id": claimed_order_id, "items": items},
+            "Đối soát tổng payment với tổng item + freight (ngưỡng 0.10 BRL)",
+        )
+        payments = payment_ctx["payments"]
+        reconciliation = payment_ctx["reconciliation"]
+
+        # 4) Delivery / handoff variance
+        delivery_ctx = self.dispatch(
+            case_id, "DeliveryAgent", "ANALYZE_DELIVERY",
+            {"order": order, "items": items},
+            "Tính delivery variance và handoff variance từng seller",
+        )
+        delivery = delivery_ctx["delivery_analysis"]
+
+        # 5) Policy decision trên toàn bộ bằng chứng đã handoff
+        policy_ctx = self.dispatch(
+            case_id, "PolicyAgent", "APPLY_EC_POLICY_V2",
+            {
+                "order": order,
+                "items": items,
+                "payments": payments,
+                "reconciliation": reconciliation,
+                "delivery_analysis": delivery,
+                "related_order_ids": customer_ctx["related_order_ids"],
+                "category_names": order_ctx["category_names"],
+            },
+            f"Áp dụng {policy_version} để chốt primary issue, trách nhiệm, refund và actions",
+        )
+
+        output = self.assemble(case_id, claimed_order_id, customer_ctx, order_ctx,
+                               payment_ctx, delivery, policy_ctx)
+
+        # 6) Vòng kiểm chứng + sửa lỗi
+        output = self.verify_with_repair(case_id, output)
+
+        self.logger.event(
+            case_id, self.name, "CustomerRequest", "CASE_COMPLETED",
+            f"Hoàn tất {case_id}: {policy_ctx['primary_issue']}, "
+            f"refund {policy_ctx['financial_resolution']['recommended_refund_brl']} BRL",
+            payload={
+                "case_status": output["case_assessment"]["case_status"],
+                "primary_issue": output["case_assessment"]["primary_issue"],
+                "recommended_refund_brl": output["financial_resolution"]["recommended_refund_brl"],
+                "evidence_count": len(output["evidence_ids"]),
+            },
+            parent=intake_id,
+        )
+        self.stats["cases"] += 1
+        return output
+
+    # -- ráp output --------------------------------------------------------
+    def assemble(self, case_id, order_id, customer_ctx, order_ctx, payment_ctx,
+                 delivery, policy_ctx) -> dict:
+        return {
             "case_id": case_id,
             "case_assessment": {
-                "primary_issue": policy_eval["primary_issue"],
-                "secondary_issues": policy_eval["secondary_issues"],
-                "case_status": policy_eval["case_status"],
-                "confidence": policy_eval["confidence"],
+                "primary_issue": policy_ctx["primary_issue"],
+                "secondary_issues": policy_ctx["secondary_issues"],
+                "case_status": policy_ctx["case_status"],
+                "confidence": policy_ctx["confidence"],
             },
             "affected_entities": {
-                "order_ids": [claimed_order_id],
-                "item_ids": op_ctx["item_ids"],
-                "seller_ids": op_ctx["seller_ids"],
-                "payment_ids": pay_ctx["payment_ids"],
+                "order_ids": policy_engine.limit([order_id], "order_ids"),
+                "item_ids": order_ctx["item_ids"],
+                "seller_ids": order_ctx["seller_ids"],
+                "payment_ids": payment_ctx["payment_ids"],
             },
             "customer_context": {
-                "customer_unique_id": cust_ctx["customer_unique_id"],
-                "related_order_ids": cust_ctx["related_order_ids"],
+                "customer_unique_id": customer_ctx["customer_unique_id"],
+                "related_order_ids": customer_ctx["related_order_ids"],
             },
             "product_context": {
-                "product_ids": op_ctx["product_ids"],
-                "category_names": op_ctx["category_names"],
+                "product_ids": order_ctx["product_ids"],
+                "category_names": order_ctx["category_names"],
             },
-            "delivery_analysis": del_analysis,
-            "payment_reconciliation": payment_recon,
+            "delivery_analysis": delivery,
+            "payment_reconciliation": payment_ctx["reconciliation"],
             "root_cause_analysis": {
-                "ranked_causes": [{"cause_code": policy_eval["root_cause_code"], "rank": 1}],
-                "responsible_parties": policy_eval["responsible_parties"],
+                "ranked_causes": policy_ctx["ranked_causes"],
+                "responsible_parties": policy_ctx["responsible_parties"],
             },
-            "evidence_ids": policy_eval["evidence_ids"],
-            "financial_resolution": policy_eval["financial_resolution"],
-            "resolution_actions": policy_eval["resolution_actions"],
+            "evidence_ids": policy_ctx["evidence_ids"],
+            "financial_resolution": policy_ctx["financial_resolution"],
+            "resolution_actions": policy_ctx["resolution_actions"],
         }
 
-        # 7. Verification step
-        self.verifier_agent.verify(case_id, output_data)
+    # -- kiểm chứng + sửa --------------------------------------------------
+    def verify_with_repair(self, case_id: str, output: dict) -> dict:
+        for attempt in range(1, self.MAX_REPAIR_ROUNDS + 1):
+            result = self.dispatch(
+                case_id, "VerifierAgent", "VERIFY_OUTPUT", {"output": output},
+                f"Kiểm chứng output lần {attempt} trước khi ghi file",
+            )
+            if result["valid"]:
+                return output
 
-        self.logger.log_handoff(
-            case_id=case_id,
-            sender_agent="CoordinatorAgent",
-            receiver_agent="User",
-            action="CASE_COMPLETED",
-            message=f"Hoàn tất xử lý case {case_id} thành công.",
-            payload_summary={"case_status": policy_eval["case_status"], "refund_brl": policy_eval["financial_resolution"]["recommended_refund_brl"]},
+            self.stats["repairs"] += 1
+            repair_id = self.logger.request(
+                case_id, "VerifierAgent", self.name, "REPAIR_REQUIRED",
+                f"Output chưa đạt, yêu cầu Coordinator chuẩn hóa: {result['errors'][:5]}",
+                payload={"error_count": len(result["errors"])},
+            )
+            output = self.normalize(output)
+            self.logger.response(
+                case_id, self.name, "VerifierAgent", "REPAIR_APPLIED",
+                "Đã chuẩn hóa giới hạn mảng, khử trùng lặp và làm tròn số tiền",
+                payload={"attempt": attempt}, parent=repair_id,
+            )
+
+        final = self.dispatch(
+            case_id, "VerifierAgent", "VERIFY_OUTPUT", {"output": output},
+            "Kiểm chứng lần cuối sau khi chuẩn hóa",
+        )
+        if not final["valid"]:
+            raise ValueError(f"{case_id} không vượt qua verifier: {final['errors']}")
+        return output
+
+    @staticmethod
+    def normalize(output: dict) -> dict:
+        """Chuẩn hóa cơ học: cắt mảng về đúng giới hạn, khử trùng lặp, làm tròn tiền."""
+        entities = output["affected_entities"]
+        for field in ("order_ids", "item_ids", "seller_ids", "payment_ids"):
+            entities[field] = policy_engine.limit(policy_engine.dedupe(entities.get(field, [])), field)
+
+        customer_ctx = output["customer_context"]
+        customer_ctx["related_order_ids"] = policy_engine.limit(
+            policy_engine.dedupe(customer_ctx.get("related_order_ids", [])), "related_order_ids"
+        )
+        product_ctx = output["product_context"]
+        product_ctx["product_ids"] = policy_engine.limit(
+            policy_engine.dedupe(product_ctx.get("product_ids", [])), "product_ids"
+        )
+        product_ctx["category_names"] = policy_engine.limit(
+            policy_engine.dedupe(product_ctx.get("category_names", [])), "category_names"
         )
 
-        return output_data
+        output["evidence_ids"] = policy_engine.limit(
+            policy_engine.dedupe(output.get("evidence_ids", [])), "evidence_ids"
+        )
+        output["resolution_actions"] = policy_engine.limit(
+            policy_engine.dedupe(output.get("resolution_actions", [])), "resolution_actions"
+        )
+
+        reconciliation = output["payment_reconciliation"]
+        for field in ("item_total_brl", "freight_total_brl", "expected_total_brl",
+                      "payment_total_brl", "difference_brl"):
+            value = reconciliation.get(field)
+            if isinstance(value, (int, float)):
+                reconciliation[field] = round(float(value), 2)
+
+        refund = output["financial_resolution"].get("recommended_refund_brl")
+        if isinstance(refund, (int, float)):
+            output["financial_resolution"]["recommended_refund_brl"] = round(float(refund), 2)
+            output["case_assessment"]["case_status"] = (
+                "action_required" if refund > 0 else "no_action"
+            )
+        return output

@@ -1,78 +1,142 @@
-# Kiến trúc Multi-Agent (A2A) — Dispute Resolution System
+# Kiến trúc Multi-Agent A2A — E-commerce Dispute Resolution (EC_POLICY_V2)
 
-## 1. Sơ đồ Tổng quan Kiến trúc
+> Bản kiến trúc của nhánh `viet` (Đinh Quốc Việt — MHV 01891). Mỗi thành viên trong nhóm
+> triển khai bản của riêng mình trên nhánh riêng; tài liệu này mô tả đúng code đang chạy
+> trong `main.py` + `src/` của nhánh này.
 
+## 1. Sơ đồ agent và luồng handoff
+
+```text
+                         input/EC_xxx.json
+                                 |
+                                 v  EVENT: CASE_RECEIVED
+                     +-----------------------------+
+                     |     CoordinatorAgent        |
+                     |  (điều phối, không tự tính) |
+                     +--+-----+-----+-----+-----+--+
+        REQUEST 1 |      |     |     |     |      | REQUEST 5
+                  v      |     |     |     |      v
+      +-------------------+    |     |     |   +--------------------+
+      |   CustomerAgent   |    |     |     |   |    PolicyAgent     |
+      | customers, orders |    |     |     |   |  EC_POLICY_V2      |
+      +-------------------+    |     |     |   +--------------------+
+                  |  RESPONSE  |     |     |            ^
+                  |            v     |     |            | bằng chứng đã hợp nhất
+                  |  +--------------------+|            |
+                  |  | OrderProductAgent  ||            |
+                  |  | items, products    ||            |
+                  |  +--------------------+|            |
+                  |            |           |            |
+                  |            v  items    v            |
+                  |  +-----------------+ +-----------------+
+                  |  |  PaymentAgent   | |  DeliveryAgent  |
+                  |  | order_payments  | | orders, items   |
+                  |  +-----------------+ +-----------------+
+                  |            |           |            |
+                  +------------+-----+-----+------------+
+                                     |
+                                     v  assemble()
+                          +----------------------+
+                          |   Output JSON draft  |
+                          +----------+-----------+
+                                     |  REQUEST: VERIFY_OUTPUT
+                                     v
+                          +----------------------+
+                          |    VerifierAgent     |
+                          |  schema + grounding  |
+                          +----+------------+----+
+                     REPAIR_REQUIRED |      | valid
+                     (quay lại       |      v
+                      Coordinator    |   output/EC_xxx.json  ->  output.zip
+                      normalize())<--+
 ```
-                            +-------------------+
-                            |   Customer Request|
-                            +---------+---------+
-                                      |
-                                      v
-                            +-------------------+
-                            | Coordinator Agent |
-                            +----+----+----+----+
-                                 |    |    |
-        +------------------------+    |    +------------------------+
-        |                             |                             |
-        v                             v                             v
-+---------------+           +-------------------+         +-------------------+
-| Customer Agent|           |OrderProduct Agent |         |   Payment Agent   |
-+-------+-------+           +---------+---------+         +---------+---------+
-        |                             |                             |
-        +------------------------+    |    +------------------------+
-                                 |    |    |
-                                 v    v    v
-                            +-------------------+
-                            |  Delivery Agent   |
-                            +---------+---------+
-                                      |
-                                      v
-                            +-------------------+
-                            |   Policy Agent    |
-                            +---------+---------+
-                                      |
-                                      v
-                            +-------------------+
-                            |  Verifier Agent   |
-                            +---------+---------+
-                                      |
-                                      v
-                            +-------------------+
-                            | Output JSON & Zip |
-                            +-------------------+
-```
 
-## 2. Vai trò và Quyền truy cập Dữ liệu của các Agent
+Toàn bộ mũi tên trên sơ đồ đều là message có thật trong `trace.jsonl`
+(700 message cho 50 case ở lượt chạy hiện tại: 100 EVENT + 300 REQUEST + 300 RESPONSE).
 
-| Agent | Vai trò & Trách nhiệm | Dữ liệu truy cập | Output bàn giao |
-| :--- | :--- | :--- | :--- |
-| **Coordinator Agent** | Tiếp nhận case khiếu nại, phân chia nhiệm vụ cho các sub-agent, tổng hợp kết quả. | `input/EC_xxx.json` | JSON Output hoàn chỉnh |
-| **Customer Agent** | Truy vết `customer_unique_id` và lịch sử mua hàng qua nhiều đơn. | `olist_customers_dataset.csv`<br>`olist_orders_dataset.csv` | `customer_unique_id`<br>`related_order_ids` |
-| **Order & Product Agent** | Kiểm tra chi tiết item, sản phẩm, danh mục tiếng Anh và thông tin seller. | `olist_order_items_dataset.csv`<br>`olist_products_dataset.csv`<br>`product_category_name_translation.csv` | `item_ids`, `product_ids`<br>`seller_ids`, `category_names` |
-| **Payment Agent** | Tổng hợp danh sách payment row, tính tổng tiền thanh toán và đối soát với kỳ vọng. | `olist_order_payments_dataset.csv` | `payment_ids`<br>`reconciliation` |
-| **Delivery Agent** | Tính toán độ lệch ngày giao hàng thực tế vs dự kiến, độ lệch bàn giao seller vs shipping limit. | `olist_orders_dataset.csv`<br>`olist_order_items_dataset.csv` | `delivery_variance_hours`<br>`seller_handoff_analysis`<br>`late_handoff_seller_ids` |
-| **Policy Agent** | Tổng hợp bằng chứng từ các Agent, áp dụng chính sách `EC_POLICY_V2` phân định trách nhiệm & khoản hoàn. | Dữ liệu tổng hợp từ các Agent trước | `primary_issue`, `secondary_issues`<br>`financial_resolution`, `evidence_ids`<br>`resolution_actions` |
-| **Verifier Agent** | Thẩm định tính hợp lệ của Output JSON (Schema, Array Limits, Format ID, Refund vs Status) trước khi ghi file. | Output JSON draft | Kết quả Validation (Pass/Fail) |
+## 2. Vai trò và quyền truy cập dữ liệu (least-privilege)
 
-## 3. Quy trình Truyền tin Handoff (Agent-to-Agent Protocol)
+Mỗi agent chỉ được cấp đúng các bảng cần cho domain của nó; quyền này khai báo tường minh
+trong thuộc tính `data_access` của từng class và được ghi kèm vào mỗi REQUEST trong trace.
 
-Mọi bước handoff dữ liệu giữa các Agent đều được tự động ghi lại dưới dạng sự kiện JSONL trong file `trace.jsonl` với cấu trúc:
+| Agent | Vai trò | Bảng được phép đọc | Bàn giao cho Coordinator |
+| --- | --- | --- | --- |
+| **CoordinatorAgent** | Nhận case, phát REQUEST, ráp output, chạy vòng sửa lỗi. Không tự tính nghiệp vụ. | `input/EC_xxx.json`, `orders` (chỉ để tra tồn tại order) | Output JSON hoàn chỉnh |
+| **CustomerAgent** | Suy ra `customer_unique_id`, tìm các order khác của cùng khách. | `customers`, `orders` | `customer_unique_id`, `related_order_ids` |
+| **OrderProductAgent** | Liệt kê item, seller, product, category theo thứ tự `order_item_id`. | `order_items`, `products`, `sellers` | `item_ids`, `seller_ids`, `product_ids`, `category_names` |
+| **PaymentAgent** | Cộng payment row, đối soát với item + freight (ngưỡng 0.10 BRL). | `order_payments` (+ item nhận qua handoff) | `payment_ids`, khối `payment_reconciliation` |
+| **DeliveryAgent** | Tính `delivery_variance_hours` và `handoff_variance_hours` theo từng seller. | `orders`, `order_items` | Khối `delivery_analysis`, `late_handoff_seller_ids` |
+| **PolicyAgent** | Áp `EC_POLICY_V2`: primary/secondary issue, root cause, trách nhiệm, refund, actions, evidence. | *Không đọc CSV* — chỉ làm việc trên bằng chứng được handoff | `case_assessment`, `root_cause_analysis`, `evidence_ids`, `financial_resolution`, `resolution_actions` |
+| **VerifierAgent** | Kiểm schema, giới hạn mảng, thứ tự nghiệp vụ, null handling, và **grounding**: mọi ID phải tồn tại thật trong CSV. | `orders`, `order_items`, `order_payments`, `sellers` | `valid` + danh sách lỗi |
+
+PolicyAgent cố tình không có quyền đọc CSV: nó chỉ được kết luận dựa trên bằng chứng do các
+agent khác bàn giao, nên không thể "tự tìm thêm" dữ liệu ngoài luồng handoff.
+
+## 3. Giao thức A2A
+
+Mỗi bước là một message JSONL trong `trace.jsonl`:
 
 ```json
 {
-  "timestamp": "2026-08-05T15:20:00.123456",
+  "run_id": "run-20260805-190649",
+  "seq": 12,
+  "msg_id": "run-20260805-190649-00012-a1b2c3",
+  "parent_msg_id": "run-20260805-190649-00011-9f8e7d",
+  "timestamp": "2026-08-05T19:06:49.812",
   "case_id": "EC_001",
-  "sender_agent": "PolicyAgent",
+  "sender_agent": "DeliveryAgent",
   "receiver_agent": "CoordinatorAgent",
-  "action": "POLICY_EVALUATION_COMPLETE",
-  "message": "Đã áp dụng EC_POLICY_V2. Primary: late_delivery_seller, Refund: 18.27 BRL...",
-  "payload_summary": { ... },
-  "evidence_ids": [ "order:...", "item:...", "seller:...", "policy:..." ]
+  "msg_type": "RESPONSE",
+  "action": "ANALYZE_DELIVERY_DONE",
+  "message": "delivery_variance=-166.52h, late_delivery=False, late_sellers=không có",
+  "payload_summary": { "delivery_variance_hours": -166.52, "late_handoff_seller_ids": [] },
+  "evidence_ids": [],
+  "latency_ms": 0.42
 }
 ```
 
-## 4. Mô hình và Môi trường Thực thi (Runtime & Model Specification)
+- `msg_type`: `REQUEST` (giao việc) → `RESPONSE` (bàn giao kết quả), thêm `EVENT` (mốc vòng đời
+  case) và `ERROR` (agent thất bại).
+- `parent_msg_id` trỏ về REQUEST sinh ra RESPONSE, nên trace dựng lại được cây handoff của
+  từng case thay vì chỉ là log phẳng.
+- File được ghi mới ở đầu mỗi lượt chạy (`TraceLogger(reset=True)`) đúng yêu cầu "chỉ lượt
+  chạy mới nhất".
 
-- **Model sử dụng**: `Qwen/Qwen2.5-7B-Instruct` (Parameters $\le 10\text{B}$).
-- **Framework**: Custom Agent-to-Agent Architecture (Python 3.10+ / Pandas).
-- **Security**: API Keys lưu trong `.env` (không commit git). Tên model khai báo tại `main.py`, `src/agent_system.py` và `metadata.json`.
+## 4. Vòng kiểm chứng và sửa lỗi
+
+VerifierAgent là cổng chặn thật, không phải bước trang trí:
+
+1. Coordinator gửi `VERIFY_OUTPUT`.
+2. Verifier chấm 5 nhóm luật (schema, giới hạn mảng + thứ tự nghiệp vụ, grounding ID theo CSV,
+   null handling khi order không có item row, nhất quán refund ↔ `case_status` ↔ root cause).
+3. Nếu có lỗi, Verifier trả `REPAIR_REQUIRED` kèm danh sách lỗi; Coordinator chạy
+   `normalize()` (cắt mảng theo giới hạn, khử trùng lặp, làm tròn 2 chữ số, đồng bộ lại
+   `case_status`) rồi gửi verify lại, tối đa 2 vòng.
+4. Chỉ output sạch lỗi mới được ghi ra `output/`. Lượt chạy hiện tại: 50/50 case pass ngay
+   vòng đầu, 0 lần phải sửa.
+
+Sau khi pipeline kết thúc, `validate_submission.py` audit lại từ đĩa: đọc lại 50 file JSON,
+chạy lại toàn bộ luật Verifier với CSV, soi nội dung `output.zip`, kiểm tra `trace.jsonl`
+chỉ có một `run_id` và phủ đủ 50 case với đủ 6 sub-agent, và kiểm tra `metadata.json` khai
+báo model ≤ 10B.
+
+## 5. Model và ranh giới quyết định
+
+- **Model**: `Qwen/Qwen2.5-7B-Instruct` — 7.6B tham số, thỏa ràng buộc ≤ 10B. Tên model khai
+  báo cứng trong `src/agent_system.py` (`MODEL_NAME`) và `metadata.json`; `.env` chỉ chứa
+  endpoint và API key, không chứa tên model.
+- **Ranh giới**: mọi con số, ID và nhãn trong output đều do rule-engine deterministic sinh ra
+  từ CSV. Model 7B đóng vai *reviewer*: nhận tóm tắt bằng chứng, xác nhận hoặc nêu nghi vấn về
+  kết luận, và kết quả đó chỉ đi vào `trace.jsonl`. Lý do: mọi trường trong schema phải kiểm
+  chứng được từ dữ liệu và evidence sai định dạng bị tính false positive, nên để LLM ghi trực
+  tiếp vào output là rủi ro thuần túy. Khi không cấu hình API key, hệ chạy hoàn toàn
+  deterministic và trace ghi rõ `llm_available: false`.
+
+## 6. Chạy lại toàn bộ
+
+```bash
+pip install -r requirements.txt
+python main.py
+python validate_submission.py
+python tests/test_policy_engine.py
+```

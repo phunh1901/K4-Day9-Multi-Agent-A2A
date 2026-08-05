@@ -1,207 +1,291 @@
 """
-data_engine.py — Thành viên A
-Nạp và truy xuất dữ liệu từ 9 file CSV của Olist.
-Cung cấp tất cả các helper function mà các Agent cần để lấy dữ liệu
-theo order_id, tính toán chỉ số giờ/tiền và xử lý null chuẩn.
+data_engine.py — Đinh Quốc Việt (nhánh `viet`)
+Lớp truy xuất dữ liệu Olist cho toàn bộ hệ Multi-Agent.
+
+Nguyên tắc:
+  - Nạp 9 CSV đúng một lần, dựng sẵn index dạng dict để mọi agent tra cứu O(1)
+    thay vì quét lại DataFrame cho từng case (50 case x 6 agent = rất nhiều lượt quét).
+  - Mọi giá trị trả về là dữ liệu thô có thể kiểm chứng trong CSV; module này
+    không suy diễn nghiệp vụ, không tạo ra sự kiện mới.
+  - Chuẩn hóa null một lần tại đây (chuỗi rỗng / "nan" / NaN -> None) để các
+    agent phía sau không phải xử lý lại.
 """
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 
-# ---------------------------------------------------------------------------
-# Nạp dữ liệu toàn bộ một lần khi import module (singleton in-memory)
-# ---------------------------------------------------------------------------
-_df_cache: dict[str, pd.DataFrame] = {}
+# Thứ tự item/payment trong mọi mảng output được chốt theo khóa số tự nhiên này
+_ITEM_SORT_KEY = "order_item_id"
+_PAYMENT_SORT_KEY = "payment_sequential"
 
-
-def _load(name: str) -> pd.DataFrame:
-    if name not in _df_cache:
-        path = DATA_DIR / name
-        _df_cache[name] = pd.read_csv(path, dtype=str, low_memory=False)
-    return _df_cache[name]
-
-
-def orders() -> pd.DataFrame:
-    return _load("olist_orders_dataset.csv")
-
-
-def customers() -> pd.DataFrame:
-    return _load("olist_customers_dataset.csv")
-
-
-def order_items() -> pd.DataFrame:
-    return _load("olist_order_items_dataset.csv")
-
-
-def order_payments() -> pd.DataFrame:
-    return _load("olist_order_payments_dataset.csv")
-
-
-def order_reviews() -> pd.DataFrame:
-    return _load("olist_order_reviews_dataset.csv")
-
-
-def products() -> pd.DataFrame:
-    return _load("olist_products_dataset.csv")
-
-
-def sellers() -> pd.DataFrame:
-    return _load("olist_sellers_dataset.csv")
-
-
-def geolocation() -> pd.DataFrame:
-    return _load("olist_geolocation_dataset.csv")
-
-
-def category_translation() -> pd.DataFrame:
-    return _load("product_category_name_translation.csv")
+_NULL_TOKENS = {"", "nan", "none", "nat", "null"}
 
 
 # ---------------------------------------------------------------------------
-# Helpers dùng order_id
+# Chuẩn hóa giá trị thô
 # ---------------------------------------------------------------------------
 
-def get_order(order_id: str) -> Optional[dict]:
-    """Trả về dòng order (dict) hoặc None nếu không tìm thấy."""
-    df = orders()
-    row = df[df["order_id"] == order_id]
-    if row.empty:
+def clean(val: Any) -> Optional[str]:
+    """Trả về chuỗi đã strip, hoặc None nếu giá trị rỗng/NaN."""
+    if val is None:
         return None
-    return row.iloc[0].to_dict()
-
-
-def get_order_items(order_id: str) -> list[dict]:
-    """Trả về danh sách item rows theo order_id."""
-    df = order_items()
-    rows = df[df["order_id"] == order_id]
-    return rows.to_dict("records")
-
-
-def get_order_payments(order_id: str) -> list[dict]:
-    """Trả về danh sách payment rows theo order_id."""
-    df = order_payments()
-    rows = df[df["order_id"] == order_id]
-    return rows.to_dict("records")
-
-
-def get_product(product_id: str) -> Optional[dict]:
-    df = products()
-    row = df[df["product_id"] == product_id]
-    if row.empty:
+    if isinstance(val, float) and pd.isna(val):
         return None
-    return row.iloc[0].to_dict()
-
-
-def get_category_name_en(category_name_pt: str) -> str:
-    """Dịch category sang tiếng Anh; nếu không có trả về giá trị gốc."""
-    df = category_translation()
-    row = df[df["product_category_name"] == category_name_pt]
-    if row.empty:
-        return category_name_pt
-    return row.iloc[0].get("product_category_name_english", category_name_pt)
-
-
-def get_customer(customer_id: str) -> Optional[dict]:
-    df = customers()
-    row = df[df["customer_id"] == customer_id]
-    if row.empty:
+    text = str(val).strip()
+    if text.lower() in _NULL_TOKENS:
         return None
-    return row.iloc[0].to_dict()
+    return text
 
 
-def get_customer_orders(customer_unique_id: str) -> list[str]:
-    """Trả về list order_id của cùng customer_unique_id (trừ order đang xét)."""
-    cust_df = customers()
-    ord_df = orders()
-    cust_ids = cust_df[cust_df["customer_unique_id"] == customer_unique_id]["customer_id"].tolist()
-    related = ord_df[ord_df["customer_id"].isin(cust_ids)]["order_id"].tolist()
-    return related
-
-
-# ---------------------------------------------------------------------------
-# Tính toán chỉ số — Làm tròn 2 chữ số thập phân
-# ---------------------------------------------------------------------------
-
-def _parse_dt(val: Optional[str]) -> Optional[datetime]:
-    if not val or str(val).strip().lower() in ("", "nan", "none", "nat"):
+def to_float(val: Any) -> Optional[float]:
+    text = clean(val)
+    if text is None:
         return None
     try:
-        return datetime.fromisoformat(str(val).strip())
+        return float(text)
     except ValueError:
         return None
 
 
-def _hours_between(dt_a: Optional[datetime], dt_b: Optional[datetime]) -> Optional[float]:
-    """dt_a - dt_b, tính bằng giờ, làm tròn 2 chữ số thập phân."""
-    if dt_a is None or dt_b is None:
-        return None
-    delta = dt_a - dt_b
-    return round(delta.total_seconds() / 3600, 2)
-
-
-def compute_delivery_variance(order: dict) -> Optional[float]:
-    """delivery_variance_hours = delivered_at - estimated_delivery_at"""
-    return _hours_between(
-        _parse_dt(order.get("order_delivered_customer_date")),
-        _parse_dt(order.get("order_estimated_delivery_date")),
-    )
-
-
-def compute_handoff_variance(order: dict, item: dict) -> Optional[float]:
-    """handoff_variance_hours = carrier_handoff_at - shipping_limit_date (của item)"""
-    return _hours_between(
-        _parse_dt(order.get("order_delivered_carrier_date")),
-        _parse_dt(item.get("shipping_limit_date")),
-    )
-
-
-def compute_payment_reconciliation(items: list[dict], payments: list[dict]) -> dict:
-    """
-    Tính toán đối soát thanh toán.
-    Trả về dict với: item_total_brl, freight_total_brl, expected_total_brl,
-    payment_total_brl, difference_brl, reconciled, payment_types.
-    Nếu items rỗng, trả về null cho expected_total_brl, difference_brl, reconciled.
-    """
+def to_int(val: Any, default: int = 0) -> int:
+    text = clean(val)
+    if text is None:
+        return default
     try:
-        item_total = round(sum(float(i.get("price", 0) or 0) for i in items), 2)
-        freight_total = round(sum(float(i.get("freight_value", 0) or 0) for i in items), 2)
-    except (ValueError, TypeError):
-        item_total = None
-        freight_total = None
+        return int(float(text))
+    except ValueError:
+        return default
 
-    payment_total = round(sum(float(p.get("payment_value", 0) or 0) for p in payments), 2) if payments else 0.0
-    payment_types = list(dict.fromkeys(p.get("payment_type", "") for p in payments if p.get("payment_type")))
 
-    if not items:
+def parse_dt(val: Any) -> Optional[datetime]:
+    """Parse timestamp CSV `YYYY-MM-DD HH:MM:SS`. So sánh nguyên trạng, không đổi timezone."""
+    text = clean(val)
+    if text is None:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+
+def hours_between(later: Optional[datetime], earlier: Optional[datetime]) -> Optional[float]:
+    """later - earlier, đơn vị giờ, làm tròn 2 chữ số. None nếu thiếu một trong hai mốc."""
+    if later is None or earlier is None:
+        return None
+    return round((later - earlier).total_seconds() / 3600, 2)
+
+
+# ---------------------------------------------------------------------------
+# Repository: nạp CSV + dựng index
+# ---------------------------------------------------------------------------
+
+class OlistRepository:
+    """Kho dữ liệu Olist đã index sẵn theo các khóa join của đề bài."""
+
+    FILES = {
+        "orders": "olist_orders_dataset.csv",
+        "customers": "olist_customers_dataset.csv",
+        "order_items": "olist_order_items_dataset.csv",
+        "order_payments": "olist_order_payments_dataset.csv",
+        "order_reviews": "olist_order_reviews_dataset.csv",
+        "products": "olist_products_dataset.csv",
+        "sellers": "olist_sellers_dataset.csv",
+        "geolocation": "olist_geolocation_dataset.csv",
+        "category_translation": "product_category_name_translation.csv",
+    }
+
+    def __init__(self, data_dir: Path = DATA_DIR):
+        self.data_dir = data_dir
+        self._frames: dict[str, pd.DataFrame] = {}
+        self._built = False
+
+    # -- nạp CSV -----------------------------------------------------------
+    def frame(self, name: str) -> pd.DataFrame:
+        if name not in self._frames:
+            self._frames[name] = pd.read_csv(
+                self.data_dir / self.FILES[name], dtype=str, low_memory=False
+            )
+        return self._frames[name]
+
+    # -- dựng index --------------------------------------------------------
+    def build(self) -> "OlistRepository":
+        if self._built:
+            return self
+
+        orders_df = self.frame("orders")
+        self.orders_by_id: dict[str, dict] = {
+            rec["order_id"]: {k: clean(v) for k, v in rec.items()}
+            for rec in orders_df.to_dict("records")
+        }
+
+        customers_df = self.frame("customers")
+        self.customers_by_id: dict[str, dict] = {}
+        customer_ids_by_unique: dict[str, set[str]] = {}
+        for rec in customers_df.to_dict("records"):
+            row = {k: clean(v) for k, v in rec.items()}
+            self.customers_by_id[row["customer_id"]] = row
+            customer_ids_by_unique.setdefault(row["customer_unique_id"], set()).add(row["customer_id"])
+        self._customer_ids_by_unique = customer_ids_by_unique
+
+        # order_id theo customer_unique_id, giữ nguyên thứ tự dòng trong orders CSV
+        self.orders_by_customer_unique: dict[str, list[str]] = {}
+        unique_by_customer_id = {
+            cid: row["customer_unique_id"] for cid, row in self.customers_by_id.items()
+        }
+        for order_id, row in self.orders_by_id.items():
+            unique_id = unique_by_customer_id.get(row.get("customer_id"))
+            if unique_id:
+                self.orders_by_customer_unique.setdefault(unique_id, []).append(order_id)
+
+        self.items_by_order: dict[str, list[dict]] = {}
+        for rec in self.frame("order_items").to_dict("records"):
+            row = {k: clean(v) for k, v in rec.items()}
+            self.items_by_order.setdefault(row["order_id"], []).append(row)
+        for rows in self.items_by_order.values():
+            rows.sort(key=lambda r: to_int(r.get(_ITEM_SORT_KEY)))
+
+        self.payments_by_order: dict[str, list[dict]] = {}
+        for rec in self.frame("order_payments").to_dict("records"):
+            row = {k: clean(v) for k, v in rec.items()}
+            self.payments_by_order.setdefault(row["order_id"], []).append(row)
+        for rows in self.payments_by_order.values():
+            rows.sort(key=lambda r: to_int(r.get(_PAYMENT_SORT_KEY)))
+
+        self.products_by_id: dict[str, dict] = {
+            rec["product_id"]: {k: clean(v) for k, v in rec.items()}
+            for rec in self.frame("products").to_dict("records")
+        }
+
+        self.seller_ids: set[str] = {
+            clean(rec["seller_id"]) for rec in self.frame("sellers").to_dict("records")
+        }
+
+        self.category_en: dict[str, str] = {
+            clean(rec["product_category_name"]): clean(rec["product_category_name_english"])
+            for rec in self.frame("category_translation").to_dict("records")
+        }
+
+        self._built = True
+        return self
+
+    # -- truy vấn ----------------------------------------------------------
+    def get_order(self, order_id: Optional[str]) -> Optional[dict]:
+        if not order_id:
+            return None
+        return self.orders_by_id.get(order_id)
+
+    def get_order_items(self, order_id: Optional[str]) -> list[dict]:
+        return list(self.items_by_order.get(order_id or "", []))
+
+    def get_order_payments(self, order_id: Optional[str]) -> list[dict]:
+        return list(self.payments_by_order.get(order_id or "", []))
+
+    def get_customer(self, customer_id: Optional[str]) -> Optional[dict]:
+        if not customer_id:
+            return None
+        return self.customers_by_id.get(customer_id)
+
+    def get_customer_order_ids(self, customer_unique_id: Optional[str]) -> list[str]:
+        if not customer_unique_id:
+            return []
+        return list(self.orders_by_customer_unique.get(customer_unique_id, []))
+
+    def get_product(self, product_id: Optional[str]) -> Optional[dict]:
+        if not product_id:
+            return None
+        return self.products_by_id.get(product_id)
+
+    def get_category_name(self, product_id: Optional[str]) -> Optional[str]:
+        """
+        Trả về `product_category_name` nguyên trạng trong products CSV.
+
+        Quyết định: KHÔNG dịch sang tiếng Anh. Đề bài chỉ liệt kê các khóa join tới
+        products/sellers/payments và yêu cầu "array giữ thứ tự ổn định theo dữ liệu
+        nguồn"; không có bước dịch category nào được mô tả trong EC_POLICY_V2, nên
+        giá trị kiểm chứng được trực tiếp từ CSV là tên gốc (tiếng Bồ Đào Nha).
+        """
+        product = self.get_product(product_id)
+        if not product:
+            return None
+        return product.get("product_category_name")
+
+    def seller_exists(self, seller_id: Optional[str]) -> bool:
+        return bool(seller_id) and seller_id in self.seller_ids
+
+    # -- tính toán chỉ số ---------------------------------------------------
+    def compute_delivery_variance(self, order: dict) -> Optional[float]:
+        """delivery_variance_hours = order_delivered_customer_date - order_estimated_delivery_date"""
+        return hours_between(
+            parse_dt(order.get("order_delivered_customer_date")),
+            parse_dt(order.get("order_estimated_delivery_date")),
+        )
+
+    def compute_handoff_variance(self, order: dict, shipping_limit_at: Optional[str]) -> Optional[float]:
+        """handoff_variance_hours = order_delivered_carrier_date - shipping_limit_date"""
+        return hours_between(
+            parse_dt(order.get("order_delivered_carrier_date")),
+            parse_dt(shipping_limit_at),
+        )
+
+    def compute_payment_reconciliation(self, items: list[dict], payments: list[dict]) -> dict:
+        """
+        expected_total_brl = sum(price) + sum(freight_value)
+        difference_brl     = sum(payment_value) - expected_total_brl
+        reconciled         = abs(difference_brl) <= 0.10
+
+        Order không có item row: expected/difference/reconciled = null (theo đề bài).
+        """
+        payment_total = round(sum(to_float(p.get("payment_value")) or 0.0 for p in payments), 2)
+        payment_types: list[str] = []
+        for p in payments:
+            ptype = p.get("payment_type")
+            if ptype and ptype not in payment_types:
+                payment_types.append(ptype)
+
+        if not items:
+            return {
+                "currency": "BRL",
+                "item_total_brl": None,
+                "freight_total_brl": None,
+                "expected_total_brl": None,
+                "payment_total_brl": payment_total,
+                "difference_brl": None,
+                "reconciled": None,
+                "payment_types": payment_types,
+            }
+
+        item_total = round(sum(to_float(i.get("price")) or 0.0 for i in items), 2)
+        freight_total = round(sum(to_float(i.get("freight_value")) or 0.0 for i in items), 2)
+        expected_total = round(item_total + freight_total, 2)
+        difference = round(payment_total - expected_total, 2)
+
         return {
             "currency": "BRL",
-            "item_total_brl": None,
-            "freight_total_brl": None,
-            "expected_total_brl": None,
+            "item_total_brl": item_total,
+            "freight_total_brl": freight_total,
+            "expected_total_brl": expected_total,
             "payment_total_brl": payment_total,
-            "difference_brl": None,
-            "reconciled": None,
+            "difference_brl": difference,
+            "reconciled": abs(difference) <= 0.10,
             "payment_types": payment_types,
         }
 
-    expected = round(item_total + freight_total, 2)
-    difference = round(payment_total - expected, 2)
-    reconciled = abs(difference) <= 0.10
 
-    return {
-        "currency": "BRL",
-        "item_total_brl": item_total,
-        "freight_total_brl": freight_total,
-        "expected_total_brl": expected,
-        "payment_total_brl": payment_total,
-        "difference_brl": difference,
-        "reconciled": reconciled,
-        "payment_types": payment_types,
-    }
+# ---------------------------------------------------------------------------
+# Singleton dùng chung cho mọi agent
+# ---------------------------------------------------------------------------
+
+REPO = OlistRepository()
+
+
+def get_repository() -> OlistRepository:
+    return REPO.build()
