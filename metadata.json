@@ -1,5 +1,5 @@
 {
-  "model_name": "gpt-4o",
+  "model_name": "Qwen/Qwen2.5-7B-Instruct",
   "parameter_size": "7B",
   "framework": "Custom Multi-Agent A2A Architecture (Python)",
   "runtime": "Python 3.10+ / Pandas / Pure Rule-Engine",
