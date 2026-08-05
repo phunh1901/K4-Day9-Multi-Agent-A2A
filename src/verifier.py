@@ -194,10 +194,12 @@ def verify_output(result: dict, repo: Optional[OlistRepository] = None) -> list[
 
         # --- 4. Null handling khi order không có item row -----------------
         if not real_items:
-            for field in ("item_total_brl", "freight_total_brl", "expected_total_brl",
-                          "difference_brl", "reconciled"):
+            for field in ("expected_total_brl", "difference_brl", "reconciled"):
                 check(reconciliation.get(field) is None,
                       f"order không có item row thì {field} phải null")
+            for field in ("item_total_brl", "freight_total_brl"):
+                check(reconciliation.get(field) == 0.0,
+                      f"order không có item row thì {field} phải là 0.0 (tổng tập rỗng), không phải null")
             check(entities.get("item_ids") == [], "order không có item row thì item_ids phải rỗng")
             check(entities.get("seller_ids") == [], "order không có item row thì seller_ids phải rỗng")
             check(product_ctx.get("product_ids") == [], "order không có item row thì product_ids phải rỗng")

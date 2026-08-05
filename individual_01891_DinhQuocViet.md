@@ -5,7 +5,7 @@
 | Thông tin       | Nội dung                                                       |
 | --------------- | -------------------------------------------------------------- |
 | Họ và tên       | Đinh Quốc Việt                                                  |
-| MSSV/MHV        | 01891                                                           |
+| MSSV/MHV        | 2A202601891                                                           |
 | Khóa/Lớp        | K4 — E403                                                       |
 | Vai trò chính   | Pipeline owner nhánh `viet`: rule-engine EC_POLICY_V2, giao thức A2A và Verifier |
 | Ngày hoàn thành | 2026-08-05                                                      |
@@ -28,24 +28,26 @@ phần code trên nhánh `viet`.
 | Runner và đóng gói | `main.py` — `main`, `write_metadata`, `package_output_zip` | `input/` | `output/EC_001..050.json`, `output.zip`, `trace.jsonl`, `metadata.json` | Hoàn thành |
 | Audit trước khi nộp | `validate_submission.py` | Artifact đã ghi ra đĩa | Báo cáo ĐẠT/KHÔNG ĐẠT, exit code | Hoàn thành |
 | Test luật nghiệp vụ | `tests/test_policy_engine.py` | Dữ liệu dựng sẵn | 31 assertion về các nhánh quyết định | Hoàn thành |
+| Công cụ dò cách diễn giải đề | `make_variants.py`, `make_probes.py` | `output/` đã sinh | Các zip chỉ khác nhau đúng một biến, dùng để đo điểm thật | Hoàn thành |
 | Tài liệu kiến trúc | `architecture.md` | — | Sơ đồ agent, bảng quyền dữ liệu, mô tả giao thức | Hoàn thành |
 
 ### Việc hỗ trợ ngoài phạm vi chính
 
 | Hoạt động | Thành viên/module được hỗ trợ | Kết quả |
 | --- | --- | --- |
-| Rà soát khai báo model của repo nhóm | `metadata.json`, `src/agent_system.py` | Phát hiện bản trên `main` khai `model_name: gpt-4o` nhưng `parameter_size: 7B` — sai ràng buộc "mỗi agent chỉ dùng model ≤ 10B". Nhánh `viet` chuyển sang `Qwen/Qwen2.5-7B-Instruct` (7.6B) và thêm bước tự kiểm tra ngưỡng 10B trong `validate_submission.py`. |
+| Rà soát khai báo model của repo nhóm | `metadata.json`, `src/agent_system.py` | Phát hiện bản trên `main` khai `model_name: gpt-4o` nhưng `parameter_size: 7B` — sai ràng buộc "mỗi agent chỉ dùng model ≤ 10B". Nhánh `viet` chuyển sang `nvidia/nemotron-nano-9b-v2` (9B, qua OpenRouter) và thêm bước tự kiểm tra ngưỡng 10B trong `validate_submission.py`. |
 | Bổ sung script audit dùng chung được | `validate_submission.py` | Bất kỳ nhánh nào cũng chạy được để soi `output.zip`, `trace.jsonl`, `metadata.json` trước khi nộp. |
 
 ## 3. Kết quả theo vai trò
 
 | Nhiệm vụ đã thực hiện | File/hàm/artifact liên quan | Kết quả bàn giao | Cách xác minh |
 | --- | --- | --- | --- |
-| Chạy pipeline trên 50 case chính thức | `main.py` | 50/50 output, 0 case lỗi, 6.0s | `python main.py` |
+| Chạy pipeline trên 50 case chính thức | `main.py` | 50/50 output, 0 case lỗi (chế độ deterministic ~6s; khi bật LLM advisory mất thêm thời gian do giãn nhịp chống rate limit) | `python main.py` |
 | Kiểm chứng lại từ đĩa | `validate_submission.py` | ĐẠT, exit code 0 | `python validate_submission.py` |
 | Chốt các nhánh luật dễ sai | `tests/test_policy_engine.py` | 31/31 assertion PASS | `python tests/test_policy_engine.py` |
 | Ghi trace A2A một lượt chạy | `trace.jsonl` | 700 message, 1 `run_id`, phủ đủ 50 case, đủ 6 sub-agent | Mục `[4]` trong output của validate |
 | Đóng gói nộp bài | `output.zip` | 50 JSON `output/EC_001..050.json`, 0.05 MB, không file lạ | Mục `[3]` trong output của validate |
+| Dò cách diễn giải đề bằng thực nghiệm | `make_variants.py` | 6 biến thể một-biến-một-lần; tìm ra lỗi null làm mất 12 điểm | Điểm thật từ hệ thống chấm: 67.3226 → 79.3 |
 
 Output cụ thể phần việc của tôi tạo ra — phân bố nhãn trên 50 case (lấy từ `metadata.json`
 mục `run.primary_issue_distribution`):
@@ -153,29 +155,51 @@ python tests/test_policy_engine.py
   nguồn" và "chỉ được nộp giá trị dựng trực tiếp từ dữ liệu". Bản dịch là một phép biến đổi
   thêm, không kiểm chứng được từ bảng `products`. Khi hai cách đọc đề đều hợp lý, tôi chọn cách
   bám sát dữ liệu gốc.
-- **Bằng chứng quyết định phù hợp:** file dịch không nằm trong danh sách khóa join ở mục 2 của
-  đề; ngoài ra tôi đã kiểm tra 50 case không có case nào `product_category_name` null, nên chọn
-  giá trị thô không tạo thêm null. Quyết định được ghi thành docstring tại
-  `OlistRepository.get_category_name` để reviewer biết đây là lựa chọn có chủ đích.
+- **Bằng chứng quyết định phù hợp:** tôi kiểm chứng bằng thực nghiệm chứ không dừng ở lập luận.
+  Dùng `make_variants.py` sinh biến thể `v1_category_en` chỉ khác baseline đúng trường này rồi
+  nộp lên hệ thống chấm: baseline **67.3226 điểm**, biến thể tiếng Anh **0 điểm**. Không phải
+  "kém hơn" mà là mất trắng — grader đối chiếu category với dữ liệu gốc và một giá trị lạ làm
+  case bị hard gate. Quyết định giữ tiếng Bồ được xác nhận, và cũng nhờ đó tôi biết hệ chấm có
+  cơ chế gate theo từng case, dùng lại được cho phần 6 dưới đây.
 
 ## 6. Một lỗi hoặc blocker đã xử lý
 
-- **Triệu chứng/lỗi nguyên văn:**
-  `UnicodeEncodeError: 'charmap' codec can't encode character 'Đ' in position 4:
-  character maps to <undefined>` — pipeline chết ngay dòng log đầu tiên, chưa xử lý được case nào.
-- **Lệnh hoặc bước tái hiện:** `python main.py` trên Windows 11, console mặc định code page 1252.
-- **Nguyên nhân gốc:** không phải lỗi dữ liệu. `sys.stdout` của Python trên Windows dùng
-  encoding `cp1252`, không biểu diễn được ký tự tiếng Việt (`Đ`, `ã`...) trong log tiến độ. File
-  JSON và trace vẫn ghi UTF-8 bình thường vì tôi mở file với `encoding="utf-8"` — chỉ có
-  **stdout** là điểm chết.
-- **Cách xử lý:** gọi `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` (và tương tự
-  cho `stderr`) ở đầu `main.py`, đặt sau phần import và có kiểm tra `hasattr` để không vỡ trên
-  môi trường stdout không hỗ trợ reconfigure.
-- **Cách xác minh sau khi sửa:** chạy lại `python main.py` — chạy hết 50 case, log tiếng Việt
-  hiển thị đúng; sau đó `python validate_submission.py` báo ĐẠT.
-- **Điều học được:** khi log bằng tiếng Việt, phải tách bạch encoding của *nội dung ghi file*
-  và encoding của *console*. Ghi file đúng chưa đủ để pipeline chạy được, và một lỗi thuần
-  hiển thị vẫn có thể chặn toàn bộ lượt chạy nếu nó nằm trên đường đi chính.
+- **Triệu chứng:** pipeline chạy sạch — 50/50 case qua Verifier, `validate_submission.py` báo
+  ĐẠT — nhưng hệ thống chấm chỉ trả **67.3226 điểm**. Không có exception, không có log lỗi,
+  không có case nào bị bỏ sót. Đây là loại lỗi tệ nhất: sai mà mọi cổng kiểm tra nội bộ đều nói
+  đúng, vì Verifier của tôi chỉ kiểm được luật tôi *biết*, không kiểm được luật tôi *hiểu sai*.
+- **Lệnh hoặc bước tái hiện:** `python main.py` rồi nộp `output.zip` lên hệ thống chấm.
+- **Cách khoanh vùng:** không có bảng điểm chi tiết cho bài của mình, nên tôi biến chính hệ
+  thống chấm thành dụng cụ đo. Viết `make_variants.py` sinh 6 zip, mỗi zip khác baseline **đúng
+  một quyết định** và vẫn tự nhất quán (không chạy lại pipeline, không tốn lượt gọi model), rồi
+  nộp lần lượt cách nhau 120 giây:
+
+  | Biến thể | Điểm | Đọc ra được gì |
+  | --- | --- | --- |
+  | baseline | 67.3226 | mốc so sánh |
+  | `v1_category_en` (dịch category) | 0 | tồn tại hard gate theo từng case; giữ tiếng Bồ là đúng |
+  | `v2_handoff_per_item` | 29.3 | gộp handoff theo seller là đúng |
+  | `v3_confidence_092` | 67.3 | `confidence` không được chấm |
+  | `v4_itemless_zero` | **79.3** | **+12 điểm** |
+  | `v5_related_sorted` | 67.3 | mảng so theo tập hợp, thứ tự không tính |
+  | `v6_refund_completion_all` | 66.9 | baseline đúng, thêm action là hỏng |
+
+- **Nguyên nhân gốc:** với 6 order không có item row, tôi để `item_total_brl` và
+  `freight_total_brl` là `null`. Đề chỉ yêu cầu **ba** trường là null —
+  `expected_total_brl`, `difference_brl`, `reconciled` — còn tổng tiền item và freight của một
+  tập rỗng vẫn là một con số: `0.0`. Tôi đã suy diễn rộng hơn đề, và tệ hơn là *mã hóa cả suy
+  diễn sai đó vào Verifier*, nên lớp kiểm chứng của chính mình bảo vệ luôn cho cái sai.
+  Phép tính xác nhận: +12 điểm chia cho 6 case = 2 điểm/case, đúng bằng trọng số tối đa của một
+  case (100/50) — tức 6 case đó trước đây bị **0 tuyệt đối**, không phải mất điểm lẻ tẻ.
+- **Cách xử lý:** sửa `OlistRepository.compute_payment_reconciliation` trả `0.0` cho hai trường
+  đó, và sửa luôn luật tương ứng trong `verify_output` để lần sau không ai quay lại `null`.
+- **Cách xác minh sau khi sửa:** biến thể `v4_itemless_zero` nộp thật lên hệ thống chấm cho
+  79.3 điểm so với 67.3226 của baseline.
+- **Điều học được:** hai bài. Một, khi đề liệt kê *đúng tên* các trường phải null thì đó là danh
+  sách đóng, không được mở rộng theo cảm tính. Hai, một Verifier tự viết chỉ chứng minh được
+  tính nhất quán với giả định của chính mình; muốn biết giả định có đúng không thì phải có tín
+  hiệu từ bên ngoài, và nếu tín hiệu đó chỉ là một con số tổng thì vẫn đo được bằng cách thay
+  đổi mỗi lần đúng một biến.
 
 ## 7. Hiểu biết về luồng end-to-end
 

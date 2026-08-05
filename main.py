@@ -134,6 +134,7 @@ def main() -> int:
     print(f"case_status           : {dict(status_counter)}")
     print(f"Tổng refund đề xuất   : {round(refund_total, 2)} BRL")
     print(f"Trace A2A             : {logger.summary()}")
+    print(f"LLM advisory          : {coordinator.advisor.stats()}")
     print(f"Thời gian chạy        : {elapsed:.1f}s")
     if failures:
         print(f"[!] {len(failures)} case lỗi: {failures}")
@@ -145,6 +146,7 @@ def main() -> int:
         "case_status_distribution": dict(status_counter),
         "total_recommended_refund_brl": round(refund_total, 2),
         "verifier_repair_rounds": coordinator.stats["repairs"],
+        "llm_advisory": coordinator.advisor.stats(),
         "trace": logger.summary(),
         "duration_seconds": round(elapsed, 2),
     }

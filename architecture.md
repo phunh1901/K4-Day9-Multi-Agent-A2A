@@ -122,15 +122,22 @@ báo model ≤ 10B.
 
 ## 5. Model và ranh giới quyết định
 
-- **Model**: `Qwen/Qwen2.5-7B-Instruct` — 7.6B tham số, thỏa ràng buộc ≤ 10B. Tên model khai
-  báo cứng trong `src/agent_system.py` (`MODEL_NAME`) và `metadata.json`; `.env` chỉ chứa
-  endpoint và API key, không chứa tên model.
+- **Model**: `nvidia/nemotron-nano-9b-v2` — 9B tham số, thỏa ràng buộc ≤ 10B (phục vụ qua
+  OpenRouter, endpoint tương thích OpenAI). Tên model khai báo cứng trong
+  `src/agent_system.py` (`MODEL_NAME`) và `metadata.json`; `.env` chỉ chứa endpoint và API
+  key, không chứa tên model. `validate_submission.py` tự đọc `parameter_size` và chặn nếu
+  vượt 10B.
 - **Ranh giới**: mọi con số, ID và nhãn trong output đều do rule-engine deterministic sinh ra
-  từ CSV. Model 7B đóng vai *reviewer*: nhận tóm tắt bằng chứng, xác nhận hoặc nêu nghi vấn về
+  từ CSV. Model 9B đóng vai *reviewer*: nhận tóm tắt bằng chứng, xác nhận hoặc nêu nghi vấn về
   kết luận, và kết quả đó chỉ đi vào `trace.jsonl`. Lý do: mọi trường trong schema phải kiểm
   chứng được từ dữ liệu và evidence sai định dạng bị tính false positive, nên để LLM ghi trực
-  tiếp vào output là rủi ro thuần túy. Khi không cấu hình API key, hệ chạy hoàn toàn
-  deterministic và trace ghi rõ `llm_available: false`.
+  tiếp vào output là rủi ro thuần túy.
+- **Độ bền khi gọi model**: free tier có giới hạn request/phút nên `LLMAdvisor` giãn nhịp tối
+  thiểu 3.5s giữa hai lượt gọi và thử lại tối đa 3 lần với backoff. Lượt gọi thất bại không
+  làm hỏng case — nó chỉ được ghi trung thực vào trace (`llm_error: ...`), và
+  `metadata.json` mục `run.llm_advisory` ghi số lượt thành công/thất bại để biết coverage
+  thật. Khi không cấu hình API key, hệ chạy hoàn toàn deterministic và trace ghi rõ
+  `llm_available: false`.
 
 ## 6. Chạy lại toàn bộ
 

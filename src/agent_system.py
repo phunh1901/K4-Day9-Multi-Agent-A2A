@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any, Optional
 
 from dotenv import load_dotenv
@@ -34,19 +35,40 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Cấu hình model — phải <= 10B parameters theo yêu cầu đề bài
 # ---------------------------------------------------------------------------
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
-MODEL_PARAMETER_SIZE = "7.6B"
+MODEL_NAME = "nvidia/nemotron-nano-9b-v2:free"
+MODEL_PARAMETER_SIZE = "9B"
 MODEL_TEMPERATURE = 0.0
-MODEL_MAX_TOKENS = 256
+MODEL_MAX_TOKENS = 512  # model có reasoning trace nên cần chỗ cho cả phần suy luận
+MODEL_TIMEOUT_SECONDS = 60
+
+# Free tier có giới hạn request/phút -> giãn nhịp và thử lại khi bị chặn.
+LLM_MIN_INTERVAL_SECONDS = 3.5
+LLM_MAX_RETRIES = 3
 
 # Chỉ endpoint và khóa nằm trong .env; tên model luôn nằm trong source.
-LLM_API_KEY = (
-    os.getenv("LLM_API_KEY")
-    or os.getenv("TOGETHER_API_KEY")
-    or os.getenv("OPENAI_API_KEY")
-    or ""
+# Giá trị mẫu trong .env.example phải bị coi như "chưa cấu hình", nếu không hệ sẽ
+# gọi API bằng key giả và tốn 3 lần retry cho từng case trước khi chịu thua.
+_PLACEHOLDER_MARKERS = ("your_", "xxxx", "_here", "changeme")
+
+
+def _real_key(*candidates: Optional[str]) -> str:
+    for value in candidates:
+        text = (value or "").strip()
+        if text and not any(marker in text.lower() for marker in _PLACEHOLDER_MARKERS):
+            return text
+    return ""
+
+
+LLM_API_KEY = _real_key(
+    os.getenv("LLM_API_KEY"),
+    os.getenv("OPENROUTER_API_KEY"),
+    os.getenv("TOGETHER_API_KEY"),
+    os.getenv("OPENAI_API_KEY"),
 )
-LLM_BASE_URL = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.together.xyz/v1"
+LLM_BASE_URL = (
+    _real_key(os.getenv("LLM_BASE_URL"), os.getenv("OPENAI_BASE_URL"))
+    or "https://openrouter.ai/api/v1"
+)
 
 try:  # openai SDK là optional: thiếu nó hệ thống vẫn chạy ở chế độ deterministic
     import openai
@@ -56,7 +78,7 @@ except ImportError:  # pragma: no cover
 
 class LLMAdvisor:
     """
-    Cầu nối tới model <= 10B (`Qwen/Qwen2.5-7B-Instruct`).
+    Cầu nối tới model <= 10B (`nvidia/nemotron-nano-9b-v2` — 9B tham số).
 
     Vai trò: *advisory only*. Model được dùng để diễn giải/đối chiếu lại kết luận
     của rule-engine bằng ngôn ngữ tự nhiên và ghi vào trace; nó không được phép
@@ -69,10 +91,14 @@ class LLMAdvisor:
     def __init__(self) -> None:
         self.model_name = MODEL_NAME
         self.client = None
-        self.calls = 0
+        self.calls_ok = 0
+        self.calls_failed = 0
+        self._last_call_at = 0.0
         if openai and LLM_API_KEY:
             try:
-                self.client = openai.OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+                self.client = openai.OpenAI(
+                    api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=MODEL_TIMEOUT_SECONDS
+                )
             except Exception as exc:  # pragma: no cover
                 print(f"[!] Không khởi tạo được LLM client: {exc}")
 
@@ -80,28 +106,64 @@ class LLMAdvisor:
     def available(self) -> bool:
         return self.client is not None
 
+    def _throttle(self) -> None:
+        """Giữ khoảng cách tối thiểu giữa hai request để không đụng rate limit free tier."""
+        wait = LLM_MIN_INTERVAL_SECONDS - (time.monotonic() - self._last_call_at)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call_at = time.monotonic()
+
     def review(self, agent_role: str, system_prompt: str, user_prompt: str) -> dict:
-        """Trả về {'llm_available', 'model', 'note'} — luôn an toàn, không raise."""
+        """
+        Trả về {'llm_available', 'model', 'note', ...} — luôn an toàn, không raise.
+        Lỗi gọi model không bao giờ làm hỏng case: output vẫn do rule-engine quyết định,
+        phần thất bại chỉ được ghi lại trung thực trong trace để biết coverage thật.
+        """
         if not self.available:
             return {"llm_available": False, "model": self.model_name, "note": "deterministic-only"}
-        try:
-            self.calls += 1
-            completion = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": f"Bạn là {agent_role}. {system_prompt}"},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=MODEL_TEMPERATURE,
-                max_tokens=MODEL_MAX_TOKENS,
-            )
-            return {
-                "llm_available": True,
-                "model": self.model_name,
-                "note": (completion.choices[0].message.content or "").strip()[:500],
-            }
-        except Exception as exc:
-            return {"llm_available": True, "model": self.model_name, "note": f"llm_error: {exc}"}
+
+        last_error = ""
+        for attempt in range(1, LLM_MAX_RETRIES + 1):
+            self._throttle()
+            try:
+                completion = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": f"Bạn là {agent_role}. {system_prompt}"},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=MODEL_TEMPERATURE,
+                    max_tokens=MODEL_MAX_TOKENS,
+                )
+                note = (completion.choices[0].message.content or "").strip()
+                self.calls_ok += 1
+                return {
+                    "llm_available": True,
+                    "model": self.model_name,
+                    "attempts": attempt,
+                    "note": note[:500] or "(model trả lời rỗng)",
+                }
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                # 429 / lỗi tạm thời: lùi theo cấp số nhân rồi thử lại
+                if attempt < LLM_MAX_RETRIES:
+                    time.sleep(LLM_MIN_INTERVAL_SECONDS * (2 ** attempt))
+
+        self.calls_failed += 1
+        return {
+            "llm_available": True,
+            "model": self.model_name,
+            "attempts": LLM_MAX_RETRIES,
+            "note": f"llm_error: {last_error[:300]}",
+        }
+
+    def stats(self) -> dict:
+        return {
+            "model": self.model_name,
+            "configured": self.available,
+            "calls_ok": self.calls_ok,
+            "calls_failed": self.calls_failed,
+        }
 
 
 # ---------------------------------------------------------------------------

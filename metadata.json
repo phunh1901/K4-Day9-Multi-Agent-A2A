@@ -1,6 +1,6 @@
 {
-  "model_name": "Qwen/Qwen2.5-7B-Instruct",
-  "parameter_size": "7.6B",
+  "model_name": "nvidia/nemotron-nano-9b-v2:free",
+  "parameter_size": "9B",
   "framework": "Custom Multi-Agent A2A (Coordinator + 6 sub-agent, Python thuần)",
   "runtime": "Python 3.10+ / pandas 2.2 / openai-compatible client (advisory)",
   "temperature": 0.0,
@@ -14,7 +14,7 @@
     "PolicyAgent",
     "VerifierAgent"
   ],
-  "decision_mode": "Toàn bộ giá trị trong output do rule-engine deterministic sinh ra từ CSV; model Qwen/Qwen2.5-7B-Instruct (<=10B) chỉ đóng vai reviewer diễn giải và được ghi vào trace, không sửa số liệu hay ID.",
+  "decision_mode": "Toàn bộ giá trị trong output do rule-engine deterministic sinh ra từ CSV; model nvidia/nemotron-nano-9b-v2:free (<=10B) chỉ đóng vai reviewer diễn giải và được ghi vào trace, không sửa số liệu hay ID.",
   "run": {
     "cases_processed": 50,
     "cases_expected": 50,
@@ -32,8 +32,14 @@
     },
     "total_recommended_refund_brl": 3437.76,
     "verifier_repair_rounds": 0,
+    "llm_advisory": {
+      "model": "nvidia/nemotron-nano-9b-v2:free",
+      "configured": true,
+      "calls_ok": 0,
+      "calls_failed": 50
+    },
     "trace": {
-      "run_id": "run-20260805-191244",
+      "run_id": "run-20260805-202251",
       "total_messages": 700,
       "by_type": {
         "EVENT": 100,
@@ -41,6 +47,6 @@
         "RESPONSE": 300
       }
     },
-    "duration_seconds": 3.97
+    "duration_seconds": 1419.95
   }
 }
