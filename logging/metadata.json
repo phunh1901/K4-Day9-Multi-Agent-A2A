@@ -1,7 +1,6 @@
 {
-  "provider": "openrouter",
-  "model": "qwen/qwen3.5-9b",
-  "parameter_size": "9B",
-  "framework": "openai-compatible API",
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "framework": "OpenAI Python SDK",
   "runtime": "Python"
 }
