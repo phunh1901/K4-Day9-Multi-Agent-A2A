@@ -54,8 +54,9 @@ class AgentRuntime:
                     except Exception as exc:
                         result = {"status": "error", "error": str(exc), "tool": name}
                         status = "error"
-                    self.trace.write("tool_called", case_id, agent, model=self.model, tool=name, input=arguments if "arguments" in locals() else {}, status="success" if status == "success" else "error", output_summary={"record_count": result.get("record_count")} if isinstance(result, dict) else {})
-                    self.trace.write("tool_result", case_id, agent, model=self.model, tool=name, status="success" if status == "success" else "error", output_summary={"record_count": result.get("record_count"), "keys": list(result) if isinstance(result, dict) else []})
+                    summary = {"record_count": result.get("record_count"), "keys": list(result)} if isinstance(result, dict) else {"value_type": type(result).__name__}
+                    self.trace.write("tool_called", case_id, agent, model=self.model, tool=name, input=arguments, status="success" if status == "success" else "error", output_summary=summary)
+                    self.trace.write("tool_result", case_id, agent, model=self.model, tool=name, status="success" if status == "success" else "error", output_summary=summary)
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result, ensure_ascii=False, default=str)})
                 continue
             content = message.content or "{}"

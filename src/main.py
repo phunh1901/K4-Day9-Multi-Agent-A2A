@@ -29,7 +29,7 @@ def load_cases(input_dir: Path, case_id: str | None = None) -> list[dict[str, An
     return cases
 
 
-def run(settings: Settings, case_id: str | None = None, max_concurrency: int = 4, dry_run: bool = False) -> int:
+def run(settings: Settings, case_id: str | None = None, max_concurrency: int = 4, dry_run: bool = False, max_failures: int = 3) -> int:
     cases = load_cases(settings.input_dir, case_id)
     if dry_run:
         DataStore(settings.data_dir)
@@ -52,6 +52,10 @@ def run(settings: Settings, case_id: str | None = None, max_concurrency: int = 4
                 trace.write("case_failed", case["case_id"], "output_writer", error=str(exc))
         else:
             failures += 1
+            trace.write("case_failed", case["case_id"], "coordinator", error="case failed; fail-fast threshold tracking", failures=failures, max_failures=max_failures)
+            if failures >= max_failures:
+                trace.write("run_stopped", case["case_id"], "coordinator", reason="max_failures_reached", failures=failures, max_failures=max_failures)
+                break
     print(json.dumps({"run_id": run_id, "cases": len(cases), "failures": failures}, ensure_ascii=False))
     return 1 if failures else 0
 
@@ -68,10 +72,11 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-concurrency", type=int, default=4)
     parser.add_argument("--max-revisions", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--max-failures", type=int, default=3, help="stop after this many failed cases")
     args = parser.parse_args(argv)
     settings = Settings(data_dir=args.data_dir, input_dir=args.input_dir, output_dir=args.output_dir, trace_file=args.trace_file, metadata_file=args.metadata_file, max_revisions=args.max_revisions)
     try:
-        return run(settings, args.case_id, args.max_concurrency, args.dry_run)
+        return run(settings, args.case_id, args.max_concurrency, args.dry_run, args.max_failures)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

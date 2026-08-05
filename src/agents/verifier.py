@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.agents.prompts import VERIFIER_OUTPUT_RULES
 from src.agents.runtime import AgentRuntime
 from src.models import FinalCaseOutput, VerificationResult
 
@@ -24,7 +25,7 @@ def deterministic_checks(candidate: dict[str, Any], store: Any) -> list[dict[str
 def run_verifier(runtime: AgentRuntime, case: dict[str, Any], dossier: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
     case_id = case["case_id"]
     candidate = decision.get("final_output", {})
-    system = """You are an independent Verifier Agent. Review the proposed output against the specialist dossier and EC_POLICY_V2. You may not query raw CSVs. Report VERIFIED or REVISION_REQUIRED; do not silently repair. Check policy priority, arithmetic, evidence, null handling, stable ordering, and array limits. Return JSON only with agent, case_id, status, defects, checks."""
+    system = f"""You are an independent Verifier Agent. Review the candidate against the dossier and EC_POLICY_V2. You may not query raw CSVs. Do not silently repair. {VERIFIER_OUTPUT_RULES}"""
     user = json.dumps({"case": case, "dossier": dossier, "candidate": candidate}, ensure_ascii=False)
     runtime.handoff(case_id, "policy_adjudicator", "verifier", "verification_result", "Independently verify proposed output", {"candidate_keys": list(candidate)})
     try:

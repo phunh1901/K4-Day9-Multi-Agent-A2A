@@ -16,6 +16,27 @@ SPECIALIST_TOOLS = {
 }
 
 
+def _normalize_evidence(values: list[Any], case_id: str) -> list[str]:
+    """Convert tool-record evidence accidentally echoed by the model to valid IDs."""
+    normalized: list[str] = []
+    for value in values:
+        if isinstance(value, str):
+            normalized.append(value)
+            continue
+        if not isinstance(value, dict):
+            continue
+        order_id = value.get("order_id")
+        if value.get("payment_sequential") is not None and order_id:
+            normalized.append(f"payment:{order_id}:{value['payment_sequential']}")
+        elif value.get("order_item_id") is not None and order_id:
+            normalized.append(f"item:{order_id}:{value['order_item_id']}")
+        elif value.get("seller_id"):
+            normalized.append(f"seller:{value['seller_id']}")
+        elif order_id:
+            normalized.append(f"order:{order_id}")
+    return list(dict.fromkeys(normalized))
+
+
 def run_specialist(runtime: AgentRuntime, agent: str, case: dict[str, Any]) -> dict[str, Any]:
     case_id = case["case_id"]
     order_id = case["customer_request"]["claimed_order_id"]
@@ -23,6 +44,8 @@ def run_specialist(runtime: AgentRuntime, agent: str, case: dict[str, Any]) -> d
     user = f"Case: {json.dumps(case, ensure_ascii=False)}\nClaimed order_id: {order_id}\nReturn exactly this report shape: {contract}"
     runtime.handoff(case_id, "coordinator", agent, "task", f"Investigate assigned domain for {order_id}", {"order_id": order_id})
     report = runtime.run_json(case_id=case_id, agent=agent, system=SPECIALIST_PROMPTS[agent], user=user, allowed_tools=SPECIALIST_TOOLS[agent])
+    if isinstance(report.get("evidence"), list):
+        report["evidence"] = _normalize_evidence(report["evidence"], case_id)
     classes = {"customer_investigator": CustomerReport, "order_product_investigator": OrderProductReport, "payment_auditor": PaymentReport, "delivery_investigator": DeliveryReport}
     validated = classes[agent].model_validate(report)
     runtime.trace.write("agent_report_created", case_id, agent, report_status=validated.status, evidence_count=len(validated.evidence))
