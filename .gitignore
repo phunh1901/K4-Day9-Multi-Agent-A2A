@@ -1,0 +1,24 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Environment variables & secrets (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+
+# Python bytecode & cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Output build artifacts (submitted separately via ZIP)
+output/
+output.zip
+
+# IDEs & System files
+.vscode/
+.idea/
+.DS_Store
