@@ -1,4 +1,5 @@
 {
+  "cohort": "Cohort 4",
   "model_name": "nvidia/nemotron-nano-9b-v2:free",
   "parameter_size": "9B",
   "framework": "Custom Multi-Agent A2A (Coordinator + 6 sub-agent, Python thuần)",

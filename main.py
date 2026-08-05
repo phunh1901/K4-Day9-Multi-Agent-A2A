@@ -43,6 +43,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 def write_metadata(run_stats: dict) -> None:
     metadata = {
+        "cohort": "Cohort 4",
         "model_name": MODEL_NAME,
         "parameter_size": MODEL_PARAMETER_SIZE,
         "framework": "Custom Multi-Agent A2A (Coordinator + 6 sub-agent, Python thuần)",
