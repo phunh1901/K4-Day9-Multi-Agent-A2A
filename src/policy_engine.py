@@ -314,8 +314,7 @@ def build_resolution_actions(
     elif primary_issue == "late_delivery_logistics":
         actions.append("review_carrier_delay")
 
-    if primary_issue in ("canceled_order_paid", "unavailable_order_paid",
-                         "late_delivery_seller", "late_delivery_logistics"):
+    if primary_issue in ("canceled_order_paid", "unavailable_order_paid"):
         actions.append("verify_refund_completion")
 
     if "multi_seller_order" in secondary_issues:

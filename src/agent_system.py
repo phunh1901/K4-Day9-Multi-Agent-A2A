@@ -26,8 +26,8 @@ load_dotenv()
 MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 
 # Secret & API Keys loaded strictly from .env (never hardcoded, never committed)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")
+OPENAI_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("TOGETHER_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+OPENAI_BASE_URL = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.together.xyz/v1"
 
 try:
     import openai
