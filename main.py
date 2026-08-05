@@ -46,9 +46,9 @@ def package_output_zip():
 
     with zipfile.ZipFile(ZIP_FILE, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for filepath in json_files:
-            zf.write(filepath, arcname=filepath.name)
+            zf.write(filepath, arcname=f"output/{filepath.name}")
 
-    print(f"[+] Successfully created {ZIP_FILE} containing {len(json_files)} JSON files (flat arcname EC_xxx.json).")
+    print(f"[+] Successfully created {ZIP_FILE} containing {len(json_files)} JSON files with arcname output/EC_xxx.json.")
 
 
 def main():
