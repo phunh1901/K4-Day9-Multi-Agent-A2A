@@ -22,12 +22,12 @@ from src.logger import TraceLogger
 
 load_dotenv()
 
-# Tên model <= 10B parameters theo quy định
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+# Tên model sử dụng cho hệ thống Multi-Agent
+MODEL_NAME = "gpt-4o"
 
 # Secret & API Keys loaded strictly from .env (never hardcoded, never committed)
 OPENAI_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("TOGETHER_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
-OPENAI_BASE_URL = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.together.xyz/v1"
+OPENAI_BASE_URL = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
 
 try:
     import openai
