@@ -3,7 +3,7 @@
   "customer_request": {
     "language": "vi",
     "message": "Hãy điều tra khiếu nại, kiểm tra lịch sử khách hàng và đối soát toàn bộ order.",
-    "claimed_order_id": "9d531c565e28c3e0d756192f84d8731f"
+    "claimed_order_id": "a4e90af1c84c4455c7c4c65293ae2c78"
   },
   "investigation_scope": {
     "include_customer_history": true,
