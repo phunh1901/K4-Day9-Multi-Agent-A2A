@@ -16,7 +16,7 @@ def main() -> int:
         raise SystemExit("output directory must contain exactly EC_001.json through EC_050.json")
     with zipfile.ZipFile(args.archive, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in files:
-            archive.write(path, path.name)
+            archive.write(path, f"output/{path.name}")
     print(f"created {args.archive} with {len(files)} files")
     return 0
 

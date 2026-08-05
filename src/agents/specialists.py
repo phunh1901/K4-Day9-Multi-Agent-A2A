@@ -43,10 +43,40 @@ def run_specialist(runtime: AgentRuntime, agent: str, case: dict[str, Any]) -> d
     contract = REPORT_CONTRACTS[agent]
     user = f"Case: {json.dumps(case, ensure_ascii=False)}\nClaimed order_id: {order_id}\nReturn exactly this report shape: {contract}"
     runtime.handoff(case_id, "coordinator", agent, "task", f"Investigate assigned domain for {order_id}", {"order_id": order_id})
-    report = runtime.run_json(case_id=case_id, agent=agent, system=SPECIALIST_PROMPTS[agent], user=user, allowed_tools=SPECIALIST_TOOLS[agent])
+    classes = {"customer_investigator": CustomerReport, "order_product_investigator": OrderProductReport, "payment_auditor": PaymentReport, "delivery_investigator": DeliveryReport}
+    def validate_report(payload: dict[str, Any]) -> Any:
+        if isinstance(payload.get("evidence"), list):
+            payload["evidence"] = _normalize_evidence(payload["evidence"], case_id)
+        invalid = [evidence_id for evidence_id in payload.get("evidence", []) if not runtime.tools.store.evidence_exists(evidence_id)]
+        if invalid:
+            raise ValueError(f"invalid evidence IDs: {invalid}")
+        return classes[agent].model_validate(payload)
+    report = runtime.run_json(case_id=case_id, agent=agent, system=SPECIALIST_PROMPTS[agent], user=user, allowed_tools=SPECIALIST_TOOLS[agent], validator=validate_report, max_rounds=12 if agent == "order_product_investigator" else (10 if agent == "delivery_investigator" else (8 if agent in {"customer_investigator", "payment_auditor"} else None)))
     if isinstance(report.get("evidence"), list):
         report["evidence"] = _normalize_evidence(report["evidence"], case_id)
-    classes = {"customer_investigator": CustomerReport, "order_product_investigator": OrderProductReport, "payment_auditor": PaymentReport, "delivery_investigator": DeliveryReport}
     validated = classes[agent].model_validate(report)
     runtime.trace.write("agent_report_created", case_id, agent, report_status=validated.status, evidence_count=len(validated.evidence))
+    return validated.model_dump()
+
+
+async def run_specialist_async(runtime: AgentRuntime, agent: str, case: dict[str, Any]) -> dict[str, Any]:
+    case_id = case["case_id"]
+    order_id = case["customer_request"]["claimed_order_id"]
+    contract = REPORT_CONTRACTS[agent]
+    user = f"Case: {json.dumps(case, ensure_ascii=False)}\nClaimed order_id: {order_id}\nReturn exactly this report shape: {contract}"
+    runtime.handoff(case_id, "coordinator", agent, "task", f"Investigate assigned domain for {order_id}", {"order_id": order_id})
+    classes = {"customer_investigator": CustomerReport, "order_product_investigator": OrderProductReport, "payment_auditor": PaymentReport, "delivery_investigator": DeliveryReport}
+
+    def validate_report(payload: dict[str, Any]) -> Any:
+        if isinstance(payload.get("evidence"), list):
+            payload["evidence"] = _normalize_evidence(payload["evidence"], case_id)
+        invalid = [evidence_id for evidence_id in payload.get("evidence", []) if not runtime.tools.store.evidence_exists(evidence_id)]
+        if invalid:
+            raise ValueError(f"invalid evidence IDs: {invalid}")
+        return classes[agent].model_validate(payload)
+
+    report = await runtime.run_json_async(case_id=case_id, agent=agent, system=SPECIALIST_PROMPTS[agent], user=user, allowed_tools=SPECIALIST_TOOLS[agent], validator=validate_report, max_rounds=12 if agent == "order_product_investigator" else (10 if agent == "delivery_investigator" else (8 if agent in {"customer_investigator", "payment_auditor"} else None)))
+    report["evidence"] = _normalize_evidence(report.get("evidence", []), case_id)
+    validated = classes[agent].model_validate(report)
+    runtime.trace.write("agent_report_created", case_id, agent, report_status=validated.status, evidence_count=len(validated.evidence), mode="async")
     return validated.model_dump()

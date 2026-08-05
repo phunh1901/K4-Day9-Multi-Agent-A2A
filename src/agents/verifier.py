@@ -5,7 +5,7 @@ from typing import Any
 
 from src.agents.prompts import VERIFIER_OUTPUT_RULES
 from src.agents.runtime import AgentRuntime
-from src.models import FinalCaseOutput, VerificationResult
+from src.models import FinalCaseOutput, VerificationDefect, VerificationResult
 
 
 def deterministic_checks(candidate: dict[str, Any], store: Any) -> list[dict[str, str]]:
@@ -25,17 +25,36 @@ def deterministic_checks(candidate: dict[str, Any], store: Any) -> list[dict[str
 def run_verifier(runtime: AgentRuntime, case: dict[str, Any], dossier: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
     case_id = case["case_id"]
     candidate = decision.get("final_output", {})
-    system = f"""You are an independent Verifier Agent. Review the candidate against the dossier and EC_POLICY_V2. You may not query raw CSVs. Do not silently repair. {VERIFIER_OUTPUT_RULES}"""
+    system = f"""You are an independent Verifier Agent. Review the candidate against the dossier and EC_POLICY_V2. You may not query raw CSVs. Do not silently repair. Validate only IDs explicitly present in candidate.evidence_ids or a specialist report's evidence array; never construct an ID by appending ':1' to an order ID and never report IDs that are not emitted by the candidate or reports. Call lookup_evidence_id once per distinct emitted evidence ID and validate_array_limits once. Never repeat a successful tool call. After these checks, immediately emit the verification JSON. {VERIFIER_OUTPUT_RULES}"""
     user = json.dumps({"case": case, "dossier": dossier, "candidate": candidate}, ensure_ascii=False)
     runtime.handoff(case_id, "policy_adjudicator", "verifier", "verification_result", "Independently verify proposed output", {"candidate_keys": list(candidate)})
     try:
-        model_result = runtime.run_json(case_id=case_id, agent="verifier", system=system, user=user, allowed_tools=["lookup_evidence_id", "validate_array_limits", "sum_money", "subtract_money", "hours_between"])
+        model_result = runtime.run_json(case_id=case_id, agent="verifier", system=system, user=user, allowed_tools=["lookup_evidence_id", "validate_array_limits"], validator=VerificationResult.model_validate, max_rounds=8)
         verified = VerificationResult.model_validate(model_result)
     except Exception as exc:
-        verified = VerificationResult(case_id=case_id, status="REVISION_REQUIRED", defects=[{"code": "VERIFIER_FAILURE", "description": str(exc), "responsible_agent": "verifier", "required_action": "retry verifier"}], checks=[])
+        verified = VerificationResult(case_id=case_id, status="REVISION_REQUIRED", defects=[VerificationDefect(code="VERIFIER_FAILURE", description=str(exc), responsible_agent="verifier", required_action="retry verifier")], checks=[])
     hard_defects = deterministic_checks(candidate, runtime.tools.store)
     if hard_defects:
         verified.status = "REVISION_REQUIRED"
-        verified.defects.extend(hard_defects)
+        verified.defects.extend(VerificationDefect.model_validate(defect) for defect in hard_defects)
     runtime.trace.write("verification_completed", case_id, "verifier", status=verified.status, defect_count=len(verified.defects))
+    return verified.model_dump()
+
+
+async def run_verifier_async(runtime: AgentRuntime, case: dict[str, Any], dossier: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    case_id = case["case_id"]
+    candidate = decision.get("final_output", {})
+    system = f"""You are an independent Verifier Agent. Review the candidate against the dossier and EC_POLICY_V2. You may not query raw CSVs. Do not silently repair. Validate only IDs explicitly present in candidate.evidence_ids or a specialist report's evidence array; never construct an ID by appending ':1' to an order ID and never report IDs that are not emitted by the candidate or reports. Call lookup_evidence_id once per distinct emitted evidence ID and validate_array_limits once. Never repeat a successful tool call. After these checks, immediately emit the verification JSON. {VERIFIER_OUTPUT_RULES}"""
+    user = json.dumps({"case": case, "dossier": dossier, "candidate": candidate}, ensure_ascii=False)
+    runtime.handoff(case_id, "policy_adjudicator", "verifier", "verification_result", "Independently verify proposed output", {"candidate_keys": list(candidate)})
+    try:
+        model_result = await runtime.run_json_async(case_id=case_id, agent="verifier", system=system, user=user, allowed_tools=["lookup_evidence_id", "validate_array_limits"], validator=VerificationResult.model_validate, max_rounds=8)
+        verified = VerificationResult.model_validate(model_result)
+    except Exception as exc:
+        verified = VerificationResult(case_id=case_id, status="REVISION_REQUIRED", defects=[VerificationDefect(code="VERIFIER_FAILURE", description=str(exc), responsible_agent="verifier", required_action="retry verifier")], checks=[])
+    hard_defects = deterministic_checks(candidate, runtime.tools.store)
+    if hard_defects:
+        verified.status = "REVISION_REQUIRED"
+        verified.defects.extend(VerificationDefect.model_validate(defect) for defect in hard_defects)
+    runtime.trace.write("verification_completed", case_id, "verifier", status=verified.status, defect_count=len(verified.defects), mode="async")
     return verified.model_dump()

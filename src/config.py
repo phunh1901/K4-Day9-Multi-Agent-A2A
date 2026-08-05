@@ -14,6 +14,5 @@ class Settings:
     trace_file: Path = Path("logging/trace.jsonl")
     metadata_file: Path = Path("logging/metadata.json")
     max_revisions: int = 2
-    max_tool_rounds: int = 8
+    max_tool_rounds: int = 6
     model: str = MODEL_NAME
-

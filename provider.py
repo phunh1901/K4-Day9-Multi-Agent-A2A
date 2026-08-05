@@ -6,7 +6,7 @@ import os
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 
 # Keep the model name in source code so the active model is auditable.
@@ -24,6 +24,18 @@ def get_client() -> OpenAI:
         )
 
     return OpenAI(api_key=api_key)
+
+
+def get_async_client() -> AsyncOpenAI:
+    """Create an asynchronous OpenAI client."""
+
+    load_dotenv()
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is missing. Copy .env.example to .env and set it."
+        )
+    return AsyncOpenAI(api_key=api_key)
 
 
 def chat_completion(messages: list[dict[str, Any]], **kwargs: Any) -> Any:
