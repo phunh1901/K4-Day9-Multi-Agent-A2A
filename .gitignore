@@ -16,7 +16,6 @@ __pycache__/
 
 # Output build artifacts (submitted separately via ZIP)
 output/
-output.zip
 
 # IDEs & System files
 .vscode/
