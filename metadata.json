@@ -1,7 +1,52 @@
 {
-  "model_name": "qwen/qwen-2.5-7b-instruct",
-  "parameter_size": "7B",
-  "framework": "Custom Multi-Agent A2A Architecture (Python)",
-  "runtime": "Python 3.10+ / Pure Rule-Engine / Multi-Agent Handoff",
-  "description": "Multi-agent e-commerce dispute resolution system running <=10B model architecture with strict A2A handoff logging."
+  "model_name": "nvidia/nemotron-nano-9b-v2:free",
+  "parameter_size": "9B",
+  "framework": "Custom Multi-Agent A2A (Coordinator + 6 sub-agent, Python thuần)",
+  "runtime": "Python 3.10+ / pandas 2.2 / openai-compatible client (advisory)",
+  "temperature": 0.0,
+  "policy_version": "EC_POLICY_V2",
+  "agents": [
+    "CoordinatorAgent",
+    "CustomerAgent",
+    "OrderProductAgent",
+    "PaymentAgent",
+    "DeliveryAgent",
+    "PolicyAgent",
+    "VerifierAgent"
+  ],
+  "decision_mode": "Toàn bộ giá trị trong output do rule-engine deterministic sinh ra từ CSV; model nvidia/nemotron-nano-9b-v2:free (<=10B) chỉ đóng vai reviewer diễn giải và được ghi vào trace, không sửa số liệu hay ID.",
+  "run": {
+    "cases_processed": 50,
+    "cases_expected": 50,
+    "primary_issue_distribution": {
+      "unsupported_late_claim": 8,
+      "late_delivery_seller": 10,
+      "late_delivery_logistics": 10,
+      "canceled_order_paid": 8,
+      "valid_split_payment": 8,
+      "unavailable_order_paid": 6
+    },
+    "case_status_distribution": {
+      "no_action": 16,
+      "action_required": 34
+    },
+    "total_recommended_refund_brl": 3437.76,
+    "verifier_repair_rounds": 0,
+    "llm_advisory": {
+      "model": "nvidia/nemotron-nano-9b-v2:free",
+      "configured": true,
+      "calls_ok": 0,
+      "calls_failed": 50
+    },
+    "trace": {
+      "run_id": "run-20260805-202251",
+      "total_messages": 700,
+      "by_type": {
+        "EVENT": 100,
+        "REQUEST": 300,
+        "RESPONSE": 300
+      }
+    },
+    "duration_seconds": 1419.95
+  }
 }
