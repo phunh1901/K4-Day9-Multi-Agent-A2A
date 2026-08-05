@@ -1,6 +1,27 @@
 {
-  "provider": "openai",
-  "model": "gpt-4o-mini",
-  "framework": "OpenAI Python SDK",
-  "runtime": "Python"
+  "models": [
+    {
+      "name": "gpt-4o-mini",
+      "parameter_size": "not publicly disclosed",
+      "provider": "OpenAI",
+      "agents": [
+        "coordinator",
+        "customer_investigator",
+        "order_product_investigator",
+        "payment_auditor",
+        "delivery_investigator",
+        "policy_adjudicator",
+        "verifier"
+      ]
+    }
+  ],
+  "framework": {
+    "name": "Explicit Python state graph with concurrent specialist execution",
+    "architecture": "restricted specialist multi-agent investigation with independent verification"
+  },
+  "runtime": {
+    "language": "Python",
+    "python_version": "3.9+"
+  },
+  "policy_version": "EC_POLICY_V2"
 }
