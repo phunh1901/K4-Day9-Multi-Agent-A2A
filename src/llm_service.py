@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from typing import Dict, List, Optional
 
-from . import llm_config
+from . import model_config
 
 _RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
@@ -47,7 +47,7 @@ class LLMError(RuntimeError):
 class OpenRouterClient:
     def __init__(self, model: str, generation: Optional[Dict] = None):
         self.model = model
-        self.generation = dict(generation or llm_config.GENERATION)
+        self.generation = dict(generation or model_config.GENERATION)
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
         self.call_count = 0

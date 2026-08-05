@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Callable, Dict, List, Optional
 
-from . import llm_client, policy
+from . import llm_service, policy_evaluator
 
 # Shared framing. Kept short on purpose: 8B models lose instruction adherence
 # fast as the system prompt grows.
@@ -151,7 +151,7 @@ def run_domain_agent(agent: str, client: llm_client.OpenRouterClient,
         })
 
     second = client.chat(messages, json_object=True)
-    handoff = llm_client.parse_json_content(second["content"])
+    handoff = llm_service.parse_json_content(second["content"])
     trace("llm_call", agent=agent, phase="handoff", tokens_in=second["prompt_tokens"],
           tokens_out=second["completion_tokens"], latency_ms=second["latency_ms"],
           parsed=handoff is not None)
@@ -160,14 +160,14 @@ def run_domain_agent(agent: str, client: llm_client.OpenRouterClient,
     return AgentResult(agent=agent, facts=facts, handoff=handoff, tool_forced=tool_forced)
 
 
-def run_policy_agent(client: llm_client.OpenRouterClient, digest: dict,
+def run_policy_agent(client: llm_service.OpenRouterClient, digest: dict,
                      trace: Callable) -> Optional[dict]:
     messages = [
         {"role": "system", "content": POLICY_PROMPT},
         {"role": "user", "content": json.dumps(digest)},
     ]
     response = client.chat(messages, json_object=True)
-    verdict = llm_client.parse_json_content(response["content"])
+    verdict = llm_service.parse_json_content(response["content"])
     trace("llm_call", agent="policy", phase="classification",
           tokens_in=response["prompt_tokens"], tokens_out=response["completion_tokens"],
           latency_ms=response["latency_ms"], parsed=verdict is not None)
@@ -175,7 +175,7 @@ def run_policy_agent(client: llm_client.OpenRouterClient, digest: dict,
     return verdict
 
 
-def run_verifier_agent(client: llm_client.OpenRouterClient, summary: dict,
+def run_verifier_agent(client: llm_service.OpenRouterClient, summary: dict,
                        schema_errors: List[str], trace: Callable) -> Optional[dict]:
     messages = [
         {"role": "system", "content": VERIFIER_PROMPT},
@@ -184,7 +184,7 @@ def run_verifier_agent(client: llm_client.OpenRouterClient, summary: dict,
         )},
     ]
     response = client.chat(messages, json_object=True)
-    review = llm_client.parse_json_content(response["content"])
+    review = llm_service.parse_json_content(response["content"])
     trace("llm_call", agent="verifier", phase="review",
           tokens_in=response["prompt_tokens"], tokens_out=response["completion_tokens"],
           latency_ms=response["latency_ms"], parsed=review is not None)
@@ -223,10 +223,10 @@ def build_policy_digest(facts: Dict[str, dict]) -> dict:
 
 
 def expected_party_type(primary_issue: str) -> str:
-    if primary_issue in (policy.CANCELED_ORDER_PAID, policy.UNAVAILABLE_ORDER_PAID):
+    if primary_issue in (policy_evaluator.CANCELED_ORDER_PAID, policy_evaluator.UNAVAILABLE_ORDER_PAID):
         return "platform"
-    if primary_issue == policy.LATE_DELIVERY_SELLER:
+    if primary_issue == policy_evaluator.LATE_DELIVERY_SELLER:
         return "seller"
-    if primary_issue == policy.LATE_DELIVERY_LOGISTICS:
+    if primary_issue == policy_evaluator.LATE_DELIVERY_LOGISTICS:
         return "logistics_provider"
     return "none"

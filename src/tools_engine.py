@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from . import analysis
+from . import domain_analyzer
 
 # ----------------------------------------------------------------- tool specs
 
@@ -120,7 +120,7 @@ class ToolRegistry:
 
     def _lookup_customer_history(self, order_id: str) -> dict:
         order = self._order(order_id)
-        customer = analysis.resolve_customer(self.store, order)
+        customer = domain_analyzer.resolve_customer(self.store, order)
         return {
             "customer_unique_id": customer["customer_unique_id"],
             "related_order_ids": customer["related_order_ids"],
@@ -131,8 +131,8 @@ class ToolRegistry:
     def _lookup_order_items(self, order_id: str) -> dict:
         order = self._order(order_id)
         items = self.store.get_items(order_id)
-        products = analysis.describe_products(self.store, items)
-        counts = analysis.summarize_order(items, [], products["category_names"])
+        products = domain_analyzer.describe_products(self.store, items)
+        counts = domain_analyzer.summarize_order(items, [], products["category_names"])
         return {
             "order_status": order["order_status"],
             "item_ids": counts["item_ids"],
@@ -148,8 +148,8 @@ class ToolRegistry:
         self._order(order_id)
         items = self.store.get_items(order_id)
         payments = self.store.get_payments(order_id)
-        result = analysis.reconcile_payments(items, payments)
-        counts = analysis.summarize_order(items, payments, [])
+        result = domain_analyzer.reconcile_payments(items, payments)
+        counts = domain_analyzer.summarize_order(items, payments, [])
         result["payment_ids"] = counts["payment_ids"]
         result["payment_count"] = counts["payment_count"]
         return result
@@ -157,10 +157,10 @@ class ToolRegistry:
     def _analyze_order_delivery(self, order_id: str) -> dict:
         order = self._order(order_id)
         items = self.store.get_items(order_id)
-        delivery = analysis.analyze_delivery(order, items)
+        delivery = domain_analyzer.analyze_delivery(order, items)
         result = dict(delivery)
         result["order_status"] = order["order_status"]
-        result["late_delivery"] = analysis.is_late_delivery(delivery)
+        result["late_delivery"] = domain_analyzer.is_late_delivery(delivery)
         return result
 
     def _order(self, order_id: str) -> dict:

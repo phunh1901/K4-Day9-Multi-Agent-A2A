@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from . import analysis, policy, schema
+from . import domain_analyzer, policy_evaluator, output_schema
 
 
 def solve_case(store, case: dict) -> Tuple[dict, List[str]]:
@@ -24,27 +24,27 @@ def solve_case(store, case: dict) -> Tuple[dict, List[str]]:
     items = store.get_items(order_id)
     payments = store.get_payments(order_id)
 
-    customer = analysis.resolve_customer(store, order)
-    products = analysis.describe_products(store, items)
-    counts = analysis.summarize_order(items, payments, products["category_names"])
-    payment_view = analysis.reconcile_payments(items, payments)
-    delivery = analysis.analyze_delivery(order, items)
-    late = analysis.is_late_delivery(delivery)
+    customer = domain_analyzer.resolve_customer(store, order)
+    products = domain_analyzer.describe_products(store, items)
+    counts = domain_analyzer.summarize_order(items, payments, products["category_names"])
+    payment_view = domain_analyzer.reconcile_payments(items, payments)
+    delivery = domain_analyzer.analyze_delivery(order, items)
+    late = domain_analyzer.is_late_delivery(delivery)
 
-    verdict = policy.apply_policy(
+    verdict = policy_evaluator.apply_policy(
         order, delivery, payment_view, counts, customer["related_order_ids"], late
     )
 
-    evidence_ids = policy.build_evidence_ids(
+    evidence_ids = policy_evaluator.build_evidence_ids(
         order_id,
-        counts["item_ids"][: schema.LIMITS["item_ids"]],
-        counts["payment_ids"][: schema.LIMITS["payment_ids"]],
+        counts["item_ids"][: output_schema.LIMITS["item_ids"]],
+        counts["payment_ids"][: output_schema.LIMITS["payment_ids"]],
         verdict["responsible_parties"],
         verdict["root_cause_code"],
     )
 
-    doc = schema.build_case_output(
+    doc = output_schema.build_case_output(
         case_id, order_id, delivery, payment_view, customer, products,
         counts, verdict, evidence_ids,
     )
-    return doc, schema.verify_case_output(doc, case_id, store)
+    return doc, output_schema.verify_case_output(doc, case_id, store)

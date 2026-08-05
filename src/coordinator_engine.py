@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-from . import agents, analysis, llm_client, llm_config, policy, schema
+from . import agent_roles, domain_analyzer, llm_service, model_config, policy_evaluator, output_schema
 
 DOMAIN_AGENTS = ("customer", "order_product", "payment", "delivery")
 
@@ -69,8 +69,8 @@ class Coordinator:
         self.registry = registry
         self.trace = trace
         self.clients = {
-            agent: llm_client.OpenRouterClient(model)
-            for agent, model in llm_config.AGENT_MODELS.items()
+            agent: llm_service.OpenRouterClient(model)
+            for agent, model in model_config.AGENT_MODELS.items()
         }
 
     # ------------------------------------------------------------------- run
@@ -90,7 +90,7 @@ class Coordinator:
         forced: List[str] = []
         for agent in DOMAIN_AGENTS:
             emit("dispatch", agent=agent, by="coordinator")
-            result = agents.run_domain_agent(
+            result = agent_roles.run_domain_agent(
                 agent, self.clients[agent], self.registry, order_id, emit
             )
             facts[agent] = result["facts"]
@@ -98,16 +98,16 @@ class Coordinator:
             if result["tool_forced"]:
                 forced.append(agent)
 
-        digest = agents.build_policy_digest(facts)
+        digest = agent_roles.build_policy_digest(facts)
         emit("dispatch", agent="policy", by="coordinator", digest=digest)
 
         truth = self._deterministic_verdict(order_id, facts)
         accepted, agreement = self._decide(case_id, digest, truth, emit)
 
         doc = self._assemble(case_id, order_id, facts, accepted)
-        schema_errors = schema.verify_case_output(doc, case_id, self.store)
+        schema_errors = output_schema.verify_case_output(doc, case_id, self.store)
 
-        review = agents.run_verifier_agent(
+        review = agent_roles.run_verifier_agent(
             self.clients["verifier"], self._summarize(doc), schema_errors, emit
         )
 
@@ -115,7 +115,7 @@ class Coordinator:
         if schema_errors:
             emit("fallback", reason="schema_errors", errors=schema_errors)
             doc = self._assemble(case_id, order_id, facts, truth)
-            schema_errors = schema.verify_case_output(doc, case_id, self.store)
+            schema_errors = output_schema.verify_case_output(doc, case_id, self.store)
             fallback = True
 
         emit("case_end", primary_issue=doc["case_assessment"]["primary_issue"],
@@ -139,11 +139,11 @@ class Coordinator:
 
     def _decide(self, case_id: str, digest: dict, truth: dict, emit) -> Tuple[dict, dict]:
         """Ask the Policy agent, check it against the table, retry once, then override."""
-        expected_party = agents.expected_party_type(truth["primary_issue"])
+        expected_party = agent_roles.expected_party_type(truth["primary_issue"])
         attempts = []
 
         for attempt in range(2):
-            verdict = agents.run_policy_agent(self.clients["policy"], digest, emit)
+            verdict = agent_roles.run_policy_agent(self.clients["policy"], digest, emit)
             issues = self._agreement_issues(verdict, truth, expected_party)
             attempts.append({"attempt": attempt + 1, "verdict": verdict, "issues": issues})
             if not issues:
@@ -155,7 +155,7 @@ class Coordinator:
                 # is a schema invariant, so the coordinator sorts rather than
                 # rejecting an otherwise correct answer over field order.
                 accepted["secondary_issues"] = sorted(
-                    set(verdict["secondary_issues"]), key=schema.SECONDARY_ISSUES.index
+                    set(verdict["secondary_issues"]), key=output_schema.SECONDARY_ISSUES.index
                 )
                 return accepted, {"agreed": True, "attempts": attempt + 1, "issues": []}
 
@@ -217,7 +217,7 @@ class Coordinator:
             "category_count": facts["order_product"]["category_count"],
             "payment_count": facts["payment"]["payment_count"],
         }
-        return policy.apply_policy(
+        return policy_evaluator.apply_policy(
             order, delivery, payment, counts,
             facts["customer"]["related_order_ids"],
             facts["delivery"]["late_delivery"],
@@ -240,14 +240,14 @@ class Coordinator:
             "seller_ids": facts["order_product"]["seller_ids"],
             "payment_ids": facts["payment"]["payment_ids"],
         }
-        evidence_ids = policy.build_evidence_ids(
+        evidence_ids = policy_evaluator.build_evidence_ids(
             order_id,
-            counts["item_ids"][: schema.LIMITS["item_ids"]],
-            counts["payment_ids"][: schema.LIMITS["payment_ids"]],
+            counts["item_ids"][: output_schema.LIMITS["item_ids"]],
+            counts["payment_ids"][: output_schema.LIMITS["payment_ids"]],
             verdict["responsible_parties"],
             verdict["root_cause_code"],
         )
-        return schema.build_case_output(
+        return output_schema.build_case_output(
             case_id, order_id, delivery, payment, customer, products,
             counts, verdict, evidence_ids,
         )

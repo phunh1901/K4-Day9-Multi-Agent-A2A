@@ -19,6 +19,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MODEL_CATALOG: Dict[str, Dict[str, object]] = {
     "meta-llama/llama-3.1-8b-instruct": {"parameters_b": 8, "context": 131072, "tools": True},
     "qwen/qwen-2.5-7b-instruct": {"parameters_b": 7, "context": 32768, "tools": True},
+    "Qwen/Qwen2.5-7B-Instruct": {"parameters_b": 7, "context": 32768, "tools": True},
     "qwen/qwen3-8b": {"parameters_b": 8, "context": 131072, "tools": True},
     "ibm-granite/granite-4.1-8b": {"parameters_b": 8, "context": 131072, "tools": True},
     "mistralai/ministral-8b-2512": {"parameters_b": 8, "context": 262144, "tools": True},

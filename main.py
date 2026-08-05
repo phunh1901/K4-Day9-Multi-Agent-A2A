@@ -15,10 +15,10 @@ import shutil
 import zipfile
 from pathlib import Path
 
-from src import llm_client, pipeline
-from src.agent_tools import ToolRegistry
-from src.data_store import OlistStore
-from src.orchestrator import Coordinator, TraceWriter
+from src import llm_service, case_pipeline
+from src.tools_engine import ToolRegistry
+from src.csv_store import OlistStore
+from src.coordinator_engine import Coordinator, TraceWriter
 
 ROOT_DIR = Path(__file__).parent
 DATA_DIR = ROOT_DIR / "data"
@@ -62,9 +62,9 @@ def main():
     print("=== STARTING MULTI-AGENT E-COMMERCE DISPUTE RESOLUTION PIPELINE ===")
 
     # Load environment variables from .env if present
-    llm_client.load_env(str(ROOT_DIR / ".env"))
+    llm_service.load_env(str(ROOT_DIR / ".env"))
 
-    # Map OPENAI_API_KEY to OPENROUTER_API_KEY if needed by src/llm_config.py
+    # Map OPENAI_API_KEY to OPENROUTER_API_KEY if needed by src/model_config.py
     if not os.environ.get("OPENROUTER_API_KEY"):
         os.environ["OPENROUTER_API_KEY"] = os.environ.get("OPENAI_API_KEY") or "mock_key"
 
@@ -94,7 +94,7 @@ def main():
             except Exception as api_err:
                 # Log fallback event to trace and use deterministic solver
                 trace.emit(case_id, "fallback_policy_solver", reason=str(api_err))
-                output_data, _errors = pipeline.solve_case(store, case_input)
+                output_data, _errors = case_pipeline.solve_case(store, case_input)
 
             output_path = OUTPUT_DIR / f"{case_id}.json"
             with open(output_path, "w", encoding="utf-8") as f:
